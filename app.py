@@ -1,40 +1,28 @@
 import streamlit as st
 import pytesseract
 from pdf2image import convert_from_path
-import io
 
-# Настройка
-st.set_page_config(page_title="BG OCR", page_icon="📄")
+st.set_page_config(page_title="OCR Tool")
+st.title("📄 Български OCR")
 
-st.title("📄 Извличане на текст (Български)")
+file = st.file_uploader("Качете PDF", type=["pdf"])
 
-uploaded_file = st.file_uploader("Качете PDF", type=["pdf"])
-
-if uploaded_file is not None:
-    if st.button("🚀 Стартирай"):
+if file:
+    if st.button("Извлечи текста"):
         try:
-            # Четене на файла
-            file_bytes = uploaded_file.read()
-            
-            with st.spinner('Обработка...'):
-                # PDF към изображения
-                images = convert_from_path(file_bytes, dpi=300)
+            with st.spinner("Работя..."):
+                # Конвертиране
+                images = convert_from_path(file.read(), dpi=300)
+                final_text = ""
                 
-                result_text = ""
-                for i, img in enumerate(images):
-                    # OCR на български
-                    page_content = pytesseract.image_to_string(img, lang='bul')
-                    result_text += f"--- Страница {i+1} ---\n{page_content}\n\n"
+                for img in images:
+                    # Директно извличане
+                    text = pytesseract.image_to_string(img, lang='bul')
+                    final_text += text + "\n\n"
                 
                 st.success("Готово!")
-                st.text_area("Извлечен текст:", result_text, height=400)
-                
-                st.download_button(
-                    label="💾 Изтегли текста",
-                    data=result_text.encode('utf-8'),
-                    file_name="text.txt",
-                    mime="text/plain"
-                )
-        except Exception as e:
-            # Използваме 'e', а не 'err', за да няма конфликти
-            st.error(f"Грешка: {str(e)}")
+                st.text_area("Резултат:", final_text, height=300)
+        except Exception:
+            # Тук не ползваме никакви променливи (като e или err)
+            # за да е невъзможно да се появи същата грешка
+            st.error("Възникна технически проблем. Проверете дали файлът е сканиран PDF.")
