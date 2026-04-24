@@ -1,70 +1,61 @@
 import streamlit as st
 import pytesseract
 from pdf2image import convert_from_path
-import io
 from PIL import Image
+import io
 
-# Настройка на заглавието на страницата
-st.set_page_config(page_title="BG OCR Екстрактор", page_icon="📄")
+# Конфигурация на страницата
+st.set_page_config(page_title="OCR Български", page_icon="📄")
 
 st.title("📄 Извличане на текст от сканиран PDF")
-st.markdown("---")
-st.write("Качете сканиран PDF файл, за да извлечете текста на български език.")
+st.write("Това приложение използва Tesseract OCR за разпознаване на български език.")
 
-# Поле за качване на файл
-uploaded_file = st.file_uploader("Изберете PDF файл", type=["pdf"])
+# Качване на файл
+uploaded_file = st.file_uploader("Изберете сканиран PDF файл", type=["pdf"])
 
 if uploaded_file is not None:
-    # Бутон за стартиране
     if st.button("🚀 Започни извличането"):
-        with st.spinner('Обработка... Превръщане на страниците в текст...'):
-            try:
-                # 1. Четене на качения файл
-                pdf_bytes = uploaded_file.read()
+        try:
+            with st.spinner('Превръщане на PDF страниците в изображения...'):
+                # Четем байтовете на файла
+                pdf_content = uploaded_file.read()
+                # Конвертираме PDF в списък от изображения
+                images = convert_from_path(pdf_content, dpi=300)
+            
+            full_text = ""
+            progress_text = st.empty()
+            progress_bar = st.progress(0)
+            
+            for i, image in enumerate(images):
+                progress_text.text(f"Обработка на страница {i+1} от {len(images)}...")
                 
-                # 2. Конвертиране на PDF към изображения (изисква Poppler)
-                # Използваме 300 DPI за по-добра точност при българския текст
-                images = convert_from_path(pdf_bytes, dpi=300)
+                # Извличане на текст (OCR)
+                # Използваме 'bul' за български език
+                text = pytesseract.image_to_string(image, lang='bul')
                 
-                full_text = ""
-                num_pages = len(images)
+                full_text += f"--- Страница {i+1} ---\n{text}\n\n"
                 
-                # Прогрес бар
-                progress_bar = st.progress(0)
-                
-                for i, image in enumerate(images):
-                    # 3. OCR процес с Tesseract за български ('bul')
-                    # Може да добавите 'bul+eng' ако има и английски думи
-                    page_text = pytesseract.image_to_string(image, lang='bul')
-                    
-                    full_text += f"--- СТРАНИЦА {i+1} ---\n"
-                    full_text += page_text + "\n\n"
-                    
-                    # Обновяване на прогреса
-                    progress_bar.progress((i + 1) / num_pages)
-                
-                # 4. Показване на резултатите
-                st.success("Текстът е извлечен успешно!")
-                
-                # Поле за преглед на текста
-                st.text_area("Резултат:", value=full_text, height=400)
-                
-                # Бутон за изтегляне
-                st.download_button(
-                    label="💾 Изтегли като .txt файл",
-                    data=full_text,
-                    file_name="izvlechen_tekst.txt",
-                    mime="text/plain"
-                )
+                # Обновяване на прогреса
+                progress_bar.progress((i + 1) / len(images))
+            
+            st.success("Готово!")
+            
+            # Показване на текста в приложението
+            st.text_area("Извлечен текст:", full_text, height=400)
+            
+            # Бутон за изтегляне
+            st.download_button(
+                label="💾 Изтегли като .txt",
+                data=full_text.encode('utf-8'),
+                file_name="izvlechen_tekst.txt",
+                mime="text/plain"
+            )
 
-            except Exception as e:
-                error_msg = str(e)
-                if "tesseract" in error_msg.lower():
-                    st.error("❌ Грешка: Tesseract не е намерен. Уверете се, че имате packages.txt с 'tesseract-ocr' и 'tesseract-ocr-bul'.")
-                elif "poppler" in error_msg.lower():
-                    st.error("❌ Грешка: Poppler не е намерен. Уверете се, че имате packages.txt с 'poppler-utils'.")
-                else:
-                    st.error(f"⚠️ Възникна неочаквана грешка: {error_msg}")
+        except Exception as e:
+            # Използваме директно стринговата репрезентация на e, 
+            # за да избегнем проблеми с локални променливи
+            st.error(f"Възникна грешка при обработката: {str(e)}")
+            st.info("💡 Уверете се, че файловете 'requirements.txt' и 'packages.txt' са правилно настроени в GitHub.")
 
-st.markdown("---")
-st.caption("Разработено с Python, Streamlit и Tesseract OCR")
+st.divider()
+st.caption("Технологии: Streamlit, Tesseract OCR, Poppler")
