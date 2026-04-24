@@ -48,7 +48,14 @@ if uploaded_file is not None:
                     mime="text/plain"
                 )
                 
-            except Exception as e:
-                st.error(f"Възникна грешка: {e}")
+                except Exception as e:
+                # Тук проверяваме какво точно се е объркало
+                error_message = str(e)
+                if "tesseract" in error_message.lower():
+                    st.error("❌ Tesseract OCR не е инсталиран на сървъра. Проверете дали имате файл packages.txt.")
+                elif "poppler" in error_message.lower():
+                    st.error("❌ Poppler не е инсталиран (нужен е за PDF). Проверете дали имате файл packages.txt.")
+                else:
+                    st.error(f"Възникна грешка: {error_message}")
 
 st.info("Забележка: Уверете се, че документът е добре осветен и четлив за по-добри резултати.")
