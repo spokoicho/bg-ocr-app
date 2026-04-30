@@ -6,7 +6,7 @@ import os
 
 # Настройка
 st.set_page_config(page_title="BG OCR", page_icon="📄")
-st.title("📄 Български OCR Екстрактор")
+st.title("📄 Български OCR Екстракторp")
 
 # Проверка дали Tesseract е инсталиран правилно в системата
 tesseract_path = shutil.which("tesseract")
