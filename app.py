@@ -8,8 +8,8 @@ import os
 import cv2
 import numpy as np
 
-st.set_page_config(page_title="Банков OCR – Ултра точност", layout="centered")
-st.title("📄 Ултра-точен OCR за банкови PDF извлечения")
+st.set_page_config(page_title="Банков OCR – стабилна версия", layout="centered")
+st.title("📄 OCR за банкови PDF извлечения (златна среда)")
 
 # Проверка за Tesseract и Poppler
 t_path = shutil.which("tesseract")
@@ -24,7 +24,7 @@ poppler_dir = os.path.dirname(p_path) if p_path else None
 
 
 # -----------------------------
-# OCR PREPROCESSING
+# УМЕРЕН PREPROCESSING
 # -----------------------------
 
 def deskew(image):
@@ -41,39 +41,33 @@ def deskew(image):
                           borderMode=cv2.BORDER_REPLICATE)
 
 
-def preprocess_strict(pil_img):
+def preprocess_moderate(pil_img):
     img = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
 
     img = deskew(img)
 
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
-    # Премахване на фон
-    bg = cv2.medianBlur(gray, 21)
-    no_bg = cv2.absdiff(gray, bg)
-    no_bg = cv2.normalize(no_bg, None, 0, 255, cv2.NORM_MINMAX)
+    # Лек контраст (без агресивно чистене)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    gray = clahe.apply(gray)
 
-    # Контраст
-    clahe = cv2.createCLAHE(clipLimit=4.0, tileGridSize=(8, 8))
-    enhanced = clahe.apply(no_bg)
-
-    # Adaptive threshold
+    # Умерен adaptive threshold
     thresh = cv2.adaptiveThreshold(
-        enhanced, 255,
-        cv2.ADAPTIVE_THRESH_MEAN_C,
+        gray, 255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
         cv2.THRESH_BINARY,
-        25, 10
+        31, 5
     )
 
-    # Морфология за изостряне
-    kernel = np.ones((1, 1), np.uint8)
-    sharp = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
+    # Леко denoising (h=15 не изяжда букви)
+    denoised = cv2.fastNlMeansDenoising(thresh, h=15)
 
-    return sharp
+    return denoised
 
 
 # -----------------------------
-# OCR FUNCTIONS
+# OCR
 # -----------------------------
 
 def ocr_text(image):
@@ -81,14 +75,6 @@ def ocr_text(image):
         image,
         lang="bul+eng",
         config="--oem 1 --psm 4"
-    )
-
-
-def ocr_codes(image):
-    return pytesseract.image_to_string(
-        image,
-        lang="eng",
-        config="--oem 1 --psm 7 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
     )
 
 
@@ -117,7 +103,7 @@ if uploaded_file is not None:
             progress = st.progress(0)
 
             for i, img in enumerate(images):
-                processed = preprocess_strict(img)
+                processed = preprocess_moderate(img)
 
                 text = ocr_text(processed)
 
