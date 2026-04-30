@@ -1,37 +1,85 @@
+import streamlit as st
+import pytesseract
+from pdf2image import convert_from_path
+import cv2
+import numpy as np
 import re
 import xml.etree.ElementTree as ET
+import tempfile
+import shutil
+import os
 
-# Нормализира OCR грешки
-def normalize_text(t: str) -> str:
+# -----------------------------
+# OCR PREPROCESSING (златна среда)
+# -----------------------------
+
+def deskew(image):
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    coords = np.column_stack(np.where(gray < 255))
+    if coords.size == 0:
+        return image
+    angle = cv2.minAreaRect(coords)[-1]
+    angle = -(90 + angle) if angle < -45 else -angle
+    (h, w) = image.shape[:2]
+    M = cv2.getRotationMatrix2D((w // 2, h // 2), angle, 1.0)
+    return cv2.warpAffine(image, M, (w, h),
+                          flags=cv2.INTER_CUBIC,
+                          borderMode=cv2.BORDER_REPLICATE)
+
+def preprocess_moderate(pil_img):
+    img = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+    img = deskew(img)
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    gray = clahe.apply(gray)
+
+    thresh = cv2.adaptiveThreshold(
+        gray, 255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY,
+        31, 5
+    )
+
+    denoised = cv2.fastNlMeansDenoising(thresh, h=15)
+    return denoised
+
+def ocr_text(image):
+    return pytesseract.image_to_string(
+        image,
+        lang="bul+eng",
+        config="--oem 1 --psm 4"
+    )
+
+# -----------------------------
+# XML PARSER FUNCTIONS
+# -----------------------------
+
+def normalize_text(t):
     replacements = {
         "СЕЛА": "СЕПА",
         "CENA": "СЕПА",
         "CEPA": "СЕПА",
-        "NAP": "NAP",
         "MAP": "NAP",
         "HAP": "NAP",
         "EYP": "EUR",
         "EUK": "EUR",
         "EUP": "EUR",
-        "ЕЦК": "EUR",
-        "ЕПК": "EUR",
         "ВСМ": "BGN",
         "ВОМ": "BGN",
-        "ET": "FT",   # честа OCR грешка във FT кодове
+        "ЕЦК": "EUR",
+        "ЕПК": "EUR",
+        "ET": "FT",
     }
     for wrong, right in replacements.items():
         t = t.replace(wrong, right)
     return t
 
-
-# Намира IBAN
-def extract_iban(text: str) -> str:
+def extract_iban(text):
     m = re.search(r'BG\d{2}[A-Z0-9]{4}\d{14}', text)
     return m.group(0) if m else ""
 
-
-# Намира период
-def extract_period(text: str):
+def extract_period(text):
     m = re.search(r'ОТ\s+(\d{2}\s+\S+\s+\d{4})\s+ДО\s+(\d{2}\s+\S+\s+\d{4})', text)
     if not m:
         return "", ""
@@ -40,34 +88,25 @@ def extract_period(text: str):
         "МАЙ": "05", "ЮНИ": "06", "ЮЛИ": "07", "АВГ": "08",
         "СЕП": "09", "ОКТ": "10", "НОЕ": "11", "ДЕК": "12"
     }
-
-    def convert(d: str) -> str:
-        parts = d.split()
-        return f"{parts[0]}/{months.get(parts[1], '01')}/{parts[2]}"
-
+    def convert(d):
+        p = d.split()
+        return f"{p[0]}/{months.get(p[1], '01')}/{p[2]}"
     return convert(m.group(1)), convert(m.group(2))
 
-
-# Намира начално салдо
-def extract_open_balance(text: str) -> str:
+def extract_open_balance(text):
     m = re.search(r'Начално салдо:\s*([0-9\.,]+)\s*EUR', text)
     return m.group(1) if m else ""
 
-
-# Намира крайно салдо
-def extract_close_balance(text: str) -> str:
+def extract_close_balance(text):
     m = re.search(r'Крайно салдо:\s*([0-9\.,]+)\s*EUR', text)
     return m.group(1) if m else ""
 
-
-# Парсва транзакции от целия текст на извлечението
-def extract_transactions(text: str):
+def extract_transactions(text):
     text = normalize_text(text)
     lines = text.split("\n")
     tx_blocks = []
     buffer = []
 
-    # групиране по блокове, започващи с дата
     for line in lines:
         if re.match(r"\d{2}/\d{2}/\d{2}", line.strip()):
             if buffer:
@@ -80,27 +119,21 @@ def extract_transactions(text: str):
     parsed = []
 
     for block in tx_blocks:
-        block_norm = normalize_text(block)
+        block = normalize_text(block)
 
-        # Дата (POST_DATE)
-        mdate = re.search(r"(\d{2}/\d{2}/\d{2})", block_norm)
+        mdate = re.search(r"(\d{2}/\d{2}/\d{2})", block)
         if not mdate:
             continue
         d = mdate.group(1)
-        # 26 -> 2026
         d = f"{d[:2]}/{d[3:5]}/20{d[6:8]}"
 
-        # FT/SBD/SBC код (REFERENCE)
-        mref = re.search(r"\b(FT|SBD|SBC)[A-Z0-9\.\-]+", block_norm)
+        mref = re.search(r"\b(FT|SBD|SBC)[A-Z0-9\.\-]+", block)
         ref = mref.group(0) if mref else ""
 
-        # Сума в EUR (последната срещната сума в блока)
-        msum_all = re.findall(r"([\-0-9\.,]+)\s*EUR", block_norm)
+        msum_all = re.findall(r"([\-0-9\.,]+)\s*EUR", block)
         if not msum_all:
             continue
-        amount_raw = msum_all[-1].replace(" ", "")
-        amount_raw = amount_raw.replace(",", ".")
-        # Тип: кредит или дебит
+        amount_raw = msum_all[-1].replace(",", ".")
         if amount_raw.startswith("-"):
             amount_d = amount_raw[1:]
             amount_c = ""
@@ -108,31 +141,23 @@ def extract_transactions(text: str):
             amount_d = ""
             amount_c = amount_raw
 
-        # Описание – TR_NAME: взимаме текста след референтния код до сумата
-        desc_line = block_norm.replace("\n", " ")
+        desc_line = block.replace("\n", " ")
         desc_line = re.sub(r"\s+", " ", desc_line)
-
-        # опит да изрежем всичко до кода FT/SBD/SBC
         if mref:
             start = desc_line.find(ref) + len(ref)
             desc_part = desc_line[start:].strip()
         else:
-            # fallback – след датата
             parts = desc_line.split(" ", 3)
             desc_part = parts[-1] if len(parts) == 4 else desc_line
-
         tr_name = desc_part[:40]
 
-        # NAME_R – контрагент/банка
-        mname = re.search(r"OT BAHKA: ([A-Z0-9 \.\-\(\)]+)", block_norm)
+        mname = re.search(r"OT BAHKA: ([A-Z0-9 \.\-\(\)]+)", block)
         name_r = mname.group(1).strip() if mname else ""
 
-        # REM_I – често фактура/договор/номер
-        mrem_i = re.search(r"(FAKTURA [^/]+|ФАКТУРА [^/]+|DOGOVOR [^/]+|ДОГОВОР [^/]+)", block_norm)
+        mrem_i = re.search(r"(FAKTURA [^/]+|ФАКТУРА [^/]+|DOGOVOR [^/]+|ДОГОВОР [^/]+)", block)
         rem_i = mrem_i.group(0).strip() if mrem_i else ""
 
-        # REM_II – вторичен идентификатор, ако има
-        mrem_ii = re.search(r"\b(INSTO/[A-Z0-9/]+|[A-Z0-9]{10,})\b", block_norm)
+        mrem_ii = re.search(r"\b(INSTO/[A-Z0-9/]+|[A-Z0-9]{10,})\b", block)
         rem_ii = mrem_ii.group(0).strip() if mrem_ii else ""
 
         parsed.append({
@@ -148,10 +173,7 @@ def extract_transactions(text: str):
 
     return parsed
 
-
-# Генерира XML по банковия формат (без TIME)
-def build_xml(iban: str, from_date: str, till_date: str,
-              open_balance: str, close_balance: str, transactions):
+def build_xml(iban, from_date, till_date, open_balance, close_balance, transactions):
     root = ET.Element("STATEMENT")
 
     ET.SubElement(root, "IBAN_S").text = iban
@@ -176,9 +198,29 @@ def build_xml(iban: str, from_date: str, till_date: str,
 
     return ET.tostring(root, encoding="utf-8").decode("utf-8")
 
+# -----------------------------
+# STREAMLIT UI
+# -----------------------------
 
-# Примерна „главна“ функция – подаваш й целия OCR текст от PDF
-def pdf_text_to_xml(full_text: str) -> str:
+st.set_page_config(page_title="OCR → XML", layout="centered")
+st.title("📄 OCR → XML Конвертор (ОББ)")
+
+uploaded = st.file_uploader("Качи PDF извлечение", type=["pdf"])
+
+if uploaded:
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+        tmp.write(uploaded.read())
+        pdf_path = tmp.name
+
+    st.info("Обработване на PDF…")
+
+    images = convert_from_path(pdf_path, dpi=400)
+
+    full_text = ""
+    for img in images:
+        processed = preprocess_moderate(img)
+        full_text += ocr_text(processed) + "\n\n"
+
     full_text = normalize_text(full_text)
 
     iban = extract_iban(full_text)
@@ -187,4 +229,9 @@ def pdf_text_to_xml(full_text: str) -> str:
     close_balance = extract_close_balance(full_text)
     transactions = extract_transactions(full_text)
 
-    return build_xml(iban, from_date, till_date, open_balance, close_balance, transactions)
+    xml_output = build_xml(iban, from_date, till_date, open_balance, close_balance, transactions)
+
+    st.subheader("XML резултат:")
+    st.text_area("", xml_output, height=400)
+
+    st.download_button("📥 Изтегли XML", xml_output, "statement.xml")
