@@ -109,9 +109,7 @@ def extract_name_r(lines, idx):
             continue
         if re.match(r"\d{2}/\d{2}/\d{2,4}", t):
             continue
-        if "EUR" in t:
-            continue
-        if "BGN" in t:
+        if "EUR" in t or "BGN" in t:
             continue
         if "OT BANKA" in t.upper():
             continue
@@ -143,6 +141,10 @@ def extract_rem_ii(block):
 # ---------------------------------------------------------
 
 def parse_statement(text):
+
+    # FIX 1: OCR залепя датите → добавяме нов ред преди всяка дата
+    text = re.sub(r"(?<!\d)(\d{2}/\d{2}/\d{2,4})", r"\n\1", text)
+
     lines = [l for l in text.split("\n") if l.strip()]
 
     # period
@@ -150,7 +152,6 @@ def parse_statement(text):
     from_date = ""
     till_date = ""
     if m:
-        # convert month names to numbers
         months = {
             "ЯНУ": "01", "ФЕВ": "02", "МАР": "03", "АПР": "04", "МАЙ": "05",
             "ЮНИ": "06", "ЮЛИ": "07", "АВГ": "08", "СЕП": "09", "ОКТ": "10",
@@ -178,15 +179,16 @@ def parse_statement(text):
     # transactions
     transactions = []
     for i, line in enumerate(lines):
-        if re.match(r"\d{2}/\d{2}/\d{2,4}", line):
+
+        # FIX 2: разпознаване на редове с две дати
+        if re.match(r"^\d{2}/\d{2}/\d{2,4}", line):
+
             block = line
-            # extend block
             j = i + 1
-            while j < len(lines) and not re.match(r"\d{2}/\d{2}/\d{2,4}", lines[j]):
+            while j < len(lines) and not re.match(r"^\d{2}/\d{2}/\d{2,4}", lines[j]):
                 block += "\n" + lines[j]
                 j += 1
 
-            # extract fields
             date = normalize_date(re.match(r"(\d{2}/\d{2}/\d{2,4})", line).group(1))
 
             amt_m = re.search(r"([\-]?[0-9.,]+)\s*EUR", block)
@@ -227,8 +229,7 @@ def generate_xml(iban, from_date, till_date, open_balance, close_balance, transa
         tr = ET.SubElement(root, "TRANSACTION")
         ET.SubElement(tr, "POST_DATE").text = t["date"]
 
-        # credit or debit
-        if t["type"] in ["СЕПА ПОЛУЧЕН"]:
+        if t["type"] == "СЕПА ПОЛУЧЕН":
             ET.SubElement(tr, "AMOUNT_C").text = t["amount"]
         else:
             ET.SubElement(tr, "AMOUNT_D").text = t["amount"]
