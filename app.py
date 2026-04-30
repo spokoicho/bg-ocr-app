@@ -1,119 +1,161 @@
-import streamlit as st
-import pytesseract
-from pdf2image import convert_from_path
-import shutil
-import sys
-import tempfile
-import os
-import cv2
-import numpy as np
+import re
+import xml.etree.ElementTree as ET
+from datetime import datetime
 
-st.set_page_config(page_title="Банков OCR – стабилна версия", layout="centered")
-st.title("📄 OCR за банкови PDF извлечения (златна среда)")
-
-# Проверка за Tesseract и Poppler
-t_path = shutil.which("tesseract")
-p_path = shutil.which("pdftoppm")
-
-if not t_path:
-    st.error("❌ Tesseract не е намерен!")
-if not p_path:
-    st.error("❌ Poppler липсва – PDF няма да се конвертира!")
-
-poppler_dir = os.path.dirname(p_path) if p_path else None
-
-
-# -----------------------------
-# УМЕРЕН PREPROCESSING
-# -----------------------------
-
-def deskew(image):
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    coords = np.column_stack(np.where(gray < 255))
-    if coords.size == 0:
-        return image
-    angle = cv2.minAreaRect(coords)[-1]
-    angle = -(90 + angle) if angle < -45 else -angle
-    (h, w) = image.shape[:2]
-    M = cv2.getRotationMatrix2D((w // 2, h // 2), angle, 1.0)
-    return cv2.warpAffine(image, M, (w, h),
-                          flags=cv2.INTER_CUBIC,
-                          borderMode=cv2.BORDER_REPLICATE)
+# Нормализира OCR грешки
+def normalize_text(t):
+    replacements = {
+        "СЕЛА": "СЕПА",
+        "CENA": "СЕПА",
+        "CEPA": "СЕПА",
+        "NAP": "NAP",
+        "MAP": "NAP",
+        "HAP": "NAP",
+        "EYP": "EUR",
+        "EUK": "EUR",
+        "EUP": "EUR",
+        "BGN": "BGN",
+        "ВСМ": "BGN",
+        "ВОМ": "BGN",
+        "ЕЦК": "EUR",
+        "ЕПК": "EUR",
+        "ET": "FT",   # OCR грешка в FT кодове
+    }
+    for wrong, right in replacements.items():
+        t = t.replace(wrong, right)
+    return t
 
 
-def preprocess_moderate(pil_img):
-    img = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
-
-    img = deskew(img)
-
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-
-    # Лек контраст (без агресивно чистене)
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-    gray = clahe.apply(gray)
-
-    # Умерен adaptive threshold
-    thresh = cv2.adaptiveThreshold(
-        gray, 255,
-        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-        cv2.THRESH_BINARY,
-        31, 5
-    )
-
-    # Леко denoising (h=15 не изяжда букви)
-    denoised = cv2.fastNlMeansDenoising(thresh, h=15)
-
-    return denoised
+# Намира IBAN
+def extract_iban(text):
+    m = re.search(r'BG\d{2}[A-Z0-9]{4}\d{14}', text)
+    return m.group(0) if m else ""
 
 
-# -----------------------------
-# OCR
-# -----------------------------
+# Намира период
+def extract_period(text):
+    m = re.search(r'ОТ\s+(\d{2}\s+\S+\s+\d{4})\s+ДО\s+(\d{2}\s+\S+\s+\d{4})', text)
+    if not m:
+        return "", ""
+    months = {
+        "ЯНУ": "01", "ФЕВ": "02", "МАР": "03", "АПР": "04",
+        "МАЙ": "05", "ЮНИ": "06", "ЮЛИ": "07", "АВГ": "08",
+        "СЕП": "09", "ОКТ": "10", "НОЕ": "11", "ДЕК": "12"
+    }
+    def convert(d):
+        parts = d.split()
+        return f"{parts[0]}/{months[parts[1]]}/{parts[2]}"
+    return convert(m.group(1)), convert(m.group(2))
 
-def ocr_text(image):
-    return pytesseract.image_to_string(
-        image,
-        lang="bul+eng",
-        config="--oem 1 --psm 4"
-    )
+
+# Намира начално салдо
+def extract_open_balance(text):
+    m = re.search(r'Начално салдо:\s*([0-9\.,]+)\s*EUR', text)
+    return m.group(1) if m else ""
 
 
-# -----------------------------
-# STREAMLIT UI
-# -----------------------------
+# Намира крайно салдо
+def extract_close_balance(text):
+    m = re.search(r'Крайно салдо:\s*([0-9\.,]+)\s*EUR', text)
+    return m.group(1) if m else ""
 
-uploaded_file = st.file_uploader("Качи PDF извлечение", type=["pdf"])
 
-if uploaded_file is not None:
-    file_bytes = uploaded_file.read()
+# Парсва транзакции
+def extract_transactions(text):
+    lines = text.split("\n")
+    tx = []
+    buffer = []
 
-    if st.button("🚀 Стартирай OCR"):
-        try:
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-                tmp.write(file_bytes)
-                tmp_path = tmp.name
+    for line in lines:
+        if re.match(r"\d{2}/\d{2}/\d{2}", line.strip()):
+            if buffer:
+                tx.append("\n".join(buffer))
+                buffer = []
+        buffer.append(line)
 
-            with st.spinner("Конвертиране на PDF (400 DPI)..."):
-                kwargs = {"dpi": 400}
-                if poppler_dir:
-                    kwargs["poppler_path"] = poppler_dir
-                images = convert_from_path(tmp_path, **kwargs)
+    if buffer:
+        tx.append("\n".join(buffer))
 
-            full_text = ""
-            progress = st.progress(0)
+    parsed = []
 
-            for i, img in enumerate(images):
-                processed = preprocess_moderate(img)
+    for block in tx:
+        block = normalize_text(block)
 
-                text = ocr_text(processed)
+        # Дата
+        mdate = re.search(r"(\d{2}/\d{2}/\d{2})", block)
+        if not mdate:
+            continue
+        d = mdate.group(1)
+        d = f"{d[:2]}/{d[3:5]}/20{d[6:8]}"
 
-                full_text += f"--- Страница {i+1} ---\n{text}\n\n"
-                progress.progress((i + 1) / len(images))
+        # FT/SBD/SBC код
+        mref = re.search(r"(FT|SBD|SBC)[A-Z0-9\.\-]+", block)
+        ref = mref.group(0) if mref else ""
 
-            st.success("Готово!")
-            st.text_area("Резултат:", full_text, height=450)
-            st.download_button("📥 Изтегли TXT", full_text.encode("utf-8"), "ocr_result.txt")
+        # Сума
+        msum = re.search(r"([\-0-9\.,]+)\s*EUR", block)
+        if not msum:
+            continue
+        amount = msum.group(1).replace(",", ".")
 
-        except Exception:
-            exc_type, exc_value, exc_traceback = sys.exc_info()
-            st.error(f"⚠️ Грешка: {exc_value}")
+        # Тип: кредит или дебит
+        if amount.startswith("-"):
+            amount_d = amount[1:]
+            amount_c = ""
+        else:
+            amount_d = ""
+            amount_c = amount
+
+        # TR_NAME (първите 40 символа от описанието)
+        desc = block.replace("\n", " ")
+        desc = re.sub(r"\s+", " ", desc)
+        desc = desc.split(" ", 3)[-1]
+        tr_name = desc[:40]
+
+        # NAME_R (банка/контрагент)
+        mname = re.search(r"OT BAHKA: ([A-Z0-9 \.\-]+)", block)
+        name_r = mname.group(1).strip() if mname else ""
+
+        # REM_I и REM_II
+        rem_i = ""
+        rem_ii = ""
+
+        parsed.append({
+            "date": d,
+            "amount_d": amount_d,
+            "amount_c": amount_c,
+            "tr_name": tr_name,
+            "name_r": name_r,
+            "rem_i": rem_i,
+            "rem_ii": rem_ii,
+            "reference": ref
+        })
+
+    return parsed
+
+
+# Генерира XML
+def build_xml(iban, from_date, till_date, open_balance, close_balance, transactions):
+    root = ET.Element("STATEMENT")
+
+    ET.SubElement(root, "IBAN_S").text = iban
+    ET.SubElement(root, "FROM_ST_DATE").text = from_date
+    ET.SubElement(root, "TILL_ST_DATE").text = till_date
+    ET.SubElement(root, "OPEN_BALANCE").text = open_balance
+
+    for t in transactions:
+        tx = ET.SubElement(root, "TRANSACTION")
+        ET.SubElement(tx, "POST_DATE").text = t["date"]
+        if t["amount_d"]:
+            ET.SubElement(tx, "AMOUNT_D").text = t["amount_d"]
+        if t["amount_c"]:
+            ET.SubElement(tx, "AMOUNT_C").text = t["amount_c"]
+        ET.SubElement(tx, "TR_NAME").text = t["tr_name"]
+        ET.SubElement(tx, "NAME_R").text = t["name_r"]
+        ET.SubElement(tx, "REM_I").text = t["rem_i"]
+        ET.SubElement(tx, "REM_II").text = t["rem_ii"]
+        ET.SubElement(tx, "REFERENCE").text = t["reference"]
+
+    ET.SubElement(root, "CLOSE_BALANCE").text = close_balance
+
+    return ET.tostring(root, encoding="utf-8").decode("utf-8")
