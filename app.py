@@ -222,6 +222,7 @@ uploaded = st.file_uploader("Качи PDF", type=["pdf"])
 
 if uploaded:
     text = ocr_pdf(uploaded.read())
+    st.text_area("OCR TEXT", text, height=400)
     iban = st.text_input("IBAN", "BG00XXXX00000000000000")
 
     if st.button("Генерирай XML"):
