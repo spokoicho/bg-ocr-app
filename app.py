@@ -1,25 +1,24 @@
 import streamlit as st
+import pytesseract
 from pdf2image import convert_from_bytes
-from paddleocr import PaddleOCR
+import cv2
 import numpy as np
 import re
 import xml.etree.ElementTree as ET
 import pandas as pd
-import cv2
 
 # ---------------------------------------------------------
-# OCR INITIALIZATION (PaddleOCR, CPU, bg+en)
+# OCR PREPROCESSING (минимално, за да пазим структурата)
 # ---------------------------------------------------------
 
-@st.cache_resource
-def load_ocr():
-    # lang='bg' покрива кирилица; латиницата се разпознава добре и така
-    return PaddleOCR(lang='bg', use_angle_cls=True, use_gpu=False)
-
-ocr = load_ocr()
+def preprocess_image(img):
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    gray = cv2.GaussianBlur(gray, (3, 3), 0)
+    gray = cv2.equalizeHist(gray)
+    return gray
 
 # ---------------------------------------------------------
-# OCR FOR PDF (PaddleOCR)
+# OCR + РЕКОНСТРУКЦИЯ
 # ---------------------------------------------------------
 
 def ocr_pdf(pdf_bytes):
@@ -28,56 +27,67 @@ def ocr_pdf(pdf_bytes):
 
     for page in pages:
         img = np.array(page)
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        proc = preprocess_image(img)
 
-        # PaddleOCR очаква BGR или RGB; подаваме gray като 3-канален
-        gray_3ch = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+        raw = pytesseract.image_to_string(
+            proc,
+            # в Streamlit Cloud най-често има само eng
+            lang="eng",
+            config="--oem 1 --psm 4"
+        )
+        full_text += "\n" + raw
 
-        result = ocr.ocr(gray_3ch, cls=True)
-        # result е списък от страници; за всяка страница – списък от редове
-        for line in result[0]:
-            txt = line[1][0]
-            full_text += txt + "\n"
-
-    return reconstruct_lines(clean_text(full_text))
+    cleaned = clean_text(full_text)
+    reconstructed = reconstruct_lines(cleaned)
+    return reconstructed
 
 # ---------------------------------------------------------
 # CLEANING & OCR FIXES
 # ---------------------------------------------------------
 
 def clean_text(text: str) -> str:
-    # Корекция на типични OCR грешки от банкови извлечения
+    # типични OCR грешки от твоите примери
     replacements = {
         "ЕЦК": "EUR",
         "EЦK": "EUR",
         "EЦК": "EUR",
         "ECК": "EUR",
+        "EC K": "EUR",
+        "ECU": "EUR",
         "ВСМ": "BGN",
         "BСM": "BGN",
+        "BCM": "BGN",
         "CENA": "СЕПА",
         "СЕМА": "СЕПА",
         "OT BAHKA": "OT BANKA",
+        "OT BAHK A": "OT BANKA",
         "ОТ БАНКА": "OT BANKA",
         "ВАН:": "IBAN:",
         "ВАН :": "IBAN :",
-        "АНУ": "ЯНУ",  # AHY → ЯНУ и подобни
+        "АНУ": "ЯНУ",
+        "AHY": "ЯНУ",
+        "СЧЕТОВОДНИ УСЛУГИОТ": "СЧЕТОВОДНИ УСЛУГИ OT",
+        "TEGLENE": "ТЕГЛЕНЕ",
+        "ATM": "ATM",
     }
     for k, v in replacements.items():
         text = text.replace(k, v)
 
-    # Нормализиране на интервали
+    # нормализиране на интервали
     text = re.sub(r"[ ]{2,}", " ", text)
+    # махаме control chars
+    text = ''.join(ch for ch in text if ord(ch) >= 9)
     return text
 
 # ---------------------------------------------------------
-# LINE RECONSTRUCTION — AGGRESSIVE (режим A)
+# LINE RECONSTRUCTION — АГРЕСИВЕН РЕЖИМ (A)
 # ---------------------------------------------------------
 
 def reconstruct_lines(text: str) -> str:
     # 1) Нов ред преди дата
     text = re.sub(r"(?<!\d)(\d{2}/\d{2}/\d{2})", r"\n\1", text)
 
-    # 2) Нов ред преди FT/SBD/SBC/такси/реф. номера
+    # 2) Нов ред преди FT/SBD/SBC/реф. номера
     text = re.sub(r"(FT[0-9A-Z]+)", r"\n\1", text)
     text = re.sub(r"(SBD\.[0-9A-Z\-]+)", r"\n\1", text)
     text = re.sub(r"(SBC\.[0-9A-Z\-]+)", r"\n\1", text)
@@ -95,7 +105,8 @@ def reconstruct_lines(text: str) -> str:
     keywords = [
         "NAP", "DANUK", "ZDRAVNI", "OSIGUROVKI",
         "OT BANKA", "СЧЕТОВОДНИ", "FAKTURA", "ФАКТУРА",
-        "ТЕГЛЕНЕ ОТ АТМ", "UBB", "DOGOVOR", "ДОГОВОР",
+        "ТЕГЛЕНЕ ОТ АТМ", "TEGLENE OT ATM", "UBB",
+        "DOGOVOR", "ДОГОВОР",
         "ЕЛЕКТРОТЕХ", "IBEKSA", "HR STUDIO", "ВИОЛИНО",
         "ЕС ПИ ВИ", "0000000111", "Q."
     ]
@@ -139,7 +150,7 @@ def is_outgoing(block: str, amount: str) -> bool:
     b = block.upper()
     if "-" in amount:
         return True
-    if "ТЕГЛЕНЕ" in b or "ATM" in b:
+    if "ТЕГЛЕНЕ" in b or "TEGLENE" in b or "ATM" in b:
         return True
     if "ИЗХОДЯЩ" in b:
         return True
@@ -153,7 +164,7 @@ def detect_type(block: str, outgoing: bool) -> str:
         return "СЕПА ПОЛУЧЕН"
     if "SBC" in b or ("SBD" in b and outgoing):
         return "СЕПА ИЗХОДЯЩ"
-    if "ТЕГЛЕНЕ" in b or "ATM" in b:
+    if "ТЕГЛЕНЕ" in b or "TEGLENE" in b or "ATM" in b:
         return "ATM ТЕГЛЕНЕ"
     if "ТАКСА" in b:
         return "ТАКСА ОБСЛУЖВАНЕ"
@@ -271,7 +282,7 @@ def generate_xml(iban: str, transactions):
 # STREAMLIT UI
 # ---------------------------------------------------------
 
-st.title("PDF → XML (ОББ формат) — PaddleOCR")
+st.title("PDF → XML (ОББ формат) — Tesseract версия")
 
 uploaded = st.file_uploader("Качи PDF", type=["pdf"])
 
