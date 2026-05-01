@@ -8,7 +8,7 @@ import xml.etree.ElementTree as ET
 import pandas as pd
 
 # ---------------------------------------------------------
-# OCR PREPROCESSING (preserve line structure)
+# OCR PREPROCESSING — preserve line structure
 # ---------------------------------------------------------
 
 def clean_text(text):
@@ -19,7 +19,7 @@ def clean_text(text):
 
 
 def preprocess_image(img):
-    # Preserve lines — no adaptive threshold, no morphology
+    # Preserve lines — no threshold, no morphology
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     gray = cv2.GaussianBlur(gray, (3,3), 0)
     gray = cv2.equalizeHist(gray)
@@ -38,6 +38,10 @@ def fix_lines(text):
     # New line before EUR/BGN
     text = re.sub(r"([0-9.,]+\s*EUR)", r"\n\1", text)
     text = re.sub(r"([0-9.,]+\s*BGN)", r"\n\1", text)
+
+    # Fix glued words like BGNNAP → BGN\nNAP
+    text = re.sub(r"(BGN)([A-Z])", r"\1\n\2", text)
+    text = re.sub(r"(EUR)([A-Z])", r"\1\n\2", text)
 
     # Remove double spaces
     text = re.sub(r"[ ]{2,}", " ", text)
@@ -124,7 +128,7 @@ def extract_name_r(lines, idx):
         t = lines[i].strip()
         if any(x in t for x in ["EUR", "BGN"]):
             continue
-        if re.match(r"\d{2}/\d{2}/\d{2,4}", t):
+        if re.match(r"\d{2}/\d{2}/\d{2}", t):
             continue
         if re.match(r"(FT|SBD|SBC)\.", t):
             continue
@@ -164,7 +168,6 @@ def extract_rem_ii(block):
 def parse_statement(text):
 
     lines = [l for l in text.split("\n") if l.strip()]
-
     transactions = []
 
     for i, line in enumerate(lines):
@@ -210,7 +213,6 @@ def parse_statement(text):
 
 def generate_xml(iban, transactions):
     root = ET.Element("STATEMENT")
-
     ET.SubElement(root, "IBAN_S").text = iban
 
     for t in transactions:
