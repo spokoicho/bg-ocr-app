@@ -256,6 +256,37 @@ def parse_statement(text):
 
     return from_date, till_date, open_balance, close_balance, transactions
 
+# Визуален преглед на транзакциите
+st.subheader("Визуален преглед на транзакциите")
+
+import pandas as pd
+
+table_rows = []
+for t in trs:
+    row = {
+        "Дата": t["date"],
+        "Час": "",
+        "Вид": t["type"],
+        "Наредител/Получател": t["name_r"],
+        "Основание": t["rem_i"],
+        "Сума": t["amount"],
+        "Тип": "Кредит" if not t["outgoing"] else "Дебит"
+    }
+    table_rows.append(row)
+
+df = pd.DataFrame(table_rows)
+
+# Подравняване и стил
+st.dataframe(
+    df.style.format({
+        "Сума": lambda x: f"{x} EUR"
+    }).apply(
+        lambda row: ["color: green" if row["Тип"] == "Кредит" else "color: red"] * len(row),
+        axis=1
+    ),
+    use_container_width=True
+)
+
 # ---------------------------------------------------------
 # XML GENERATOR
 # ---------------------------------------------------------
