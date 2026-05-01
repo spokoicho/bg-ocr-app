@@ -19,7 +19,6 @@ def clean_text(text):
 def preprocess_image(img):
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
-    # deskew
     coords = np.column_stack(np.where(gray < 255))
     if len(coords) > 0:
         angle = cv2.minAreaRect(coords)[-1]
@@ -31,19 +30,15 @@ def preprocess_image(img):
         M = cv2.getRotationMatrix2D((w//2, h//2), angle, 1.0)
         gray = cv2.warpAffine(gray, M, (w, h), flags=cv2.INTER_CUBIC)
 
-    # CLAHE
     clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
     gray = clahe.apply(gray)
 
-    # adaptive threshold
     th = cv2.adaptiveThreshold(gray,255,cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
                                cv2.THRESH_BINARY,31,15)
 
-    # morphological closing
     kernel = np.ones((2,2), np.uint8)
     th = cv2.morphologyEx(th, cv2.MORPH_CLOSE, kernel)
 
-    # denoise
     th = cv2.fastNlMeansDenoising(th, None, 30, 7, 21)
 
     return th
@@ -59,6 +54,49 @@ def ocr_pdf(pdf_bytes):
         full_text += "\n" + text
 
     return clean_text(full_text)
+
+# ---------------------------------------------------------
+# VISUAL OCR FORMATTER
+# ---------------------------------------------------------
+
+def pretty_blocks(text):
+    text = re.sub(r"(?<!\d)(\d{2}/\d{2}/\d{2,4})", r"\n\1", text)
+    text = re.sub(r"(FT[0-9A-Z]+)", r"\n\1", text)
+    text = re.sub(r"(SBD\.[0-9A-Z\-]+)", r"\n\1", text)
+    text = re.sub(r"(SBC\.[0-9A-Z\-]+)", r"\n\1", text)
+    text = re.sub(r"(ATM)", r"\nATM", text)
+    text = re.sub(r"([0-9.,]+\s*EUR)", r"\n\1", text)
+    text = re.sub(r"([0-9.,]+\s*BGN)", r"\n\1", text)
+
+    lines = [l.strip() for l in text.split("\n") if l.strip()]
+
+    blocks = []
+    current = []
+
+    for l in lines:
+        if re.match(r"^\d{2}/\d{2}/\d{2,4}", l) and current:
+            blocks.append(current)
+            current = []
+        current.append(l)
+
+    if current:
+        blocks.append(current)
+
+    formatted = ""
+    for b in blocks:
+        formatted += "### 🟦 Операция\n"
+        for line in b:
+            if re.match(r"^\d{2}/\d{2}/\d{2,4}", line):
+                formatted += f"**Дата:** {line}\n"
+            elif line.startswith(("FT", "SBD", "SBC")):
+                formatted += f"**Код:** `{line}`\n"
+            elif "EUR" in line:
+                formatted += f"**Сума:** {line}\n"
+            else:
+                formatted += f"{line}\n"
+        formatted += "\n---\n\n"
+
+    return formatted
 
 # ---------------------------------------------------------
 # PARSER HELPERS
@@ -142,12 +180,10 @@ def extract_rem_ii(block):
 
 def parse_statement(text):
 
-    # FIX 1: OCR залепя датите → добавяме нов ред преди всяка дата
     text = re.sub(r"(?<!\d)(\d{2}/\d{2}/\d{2,4})", r"\n\1", text)
 
     lines = [l for l in text.split("\n") if l.strip()]
 
-    # period
     m = re.search(r"ОТ\s+(\d{2}\s*[А-ЯA-Z]+\s*\d{4}).*ДО\s+(\d{2}\s*[А-ЯA-Z]+\s*\d{4})", text)
     from_date = ""
     till_date = ""
@@ -168,19 +204,15 @@ def parse_statement(text):
         from_date = conv(fd)
         till_date = conv(td)
 
-    # opening balance
     m2 = re.search(r"Начално салдо[: ]+([0-9.,]+)", text)
     open_balance = normalize_amount(m2.group(1)) if m2 else ""
 
-    # closing balance
     m3 = re.search(r"Крайно салдо[: ]+([0-9.,]+)", text)
     close_balance = normalize_amount(m3.group(1)) if m3 else ""
 
-    # transactions
     transactions = []
     for i, line in enumerate(lines):
 
-        # FIX 2: разпознаване на редове с две дати
         if re.match(r"^\d{2}/\d{2}/\d{2,4}", line):
 
             block = line
@@ -256,7 +288,9 @@ uploaded = st.file_uploader("Качи PDF", type=["pdf"])
 
 if uploaded:
     text = ocr_pdf(uploaded.read())
-    st.text_area("OCR TEXT", text, height=400)
+
+    pretty = pretty_blocks(text)
+    st.markdown(pretty)
 
     iban = st.text_input("IBAN", "BG00XXXX00000000000000")
 
