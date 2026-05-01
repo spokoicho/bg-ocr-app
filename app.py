@@ -112,8 +112,6 @@ def normalize_amount(val):
     return val
 
 def normalize_date(d):
-    if not d:
-        return ""
     m = re.match(r"(\d{2})/(\d{2})/(\d{2,4})", d)
     if not m:
         return d
@@ -122,18 +120,28 @@ def normalize_date(d):
         yy = "20" + yy
     return f"{dd}/{mm}/{yy}"
 
-def detect_type(block):
+def is_outgoing(block, amount):
     b = block.upper()
-    if "SBD" in b:
+    if "-" in amount:
+        return True
+    if "ТЕГЛЕНЕ" in b or "ATM" in b:
+        return True
+    if "ИЗХОДЯЩ" in b:
+        return True
+    if "FT" in b and "ПОЛУЧЕН" not in b:
+        return True
+    return False
+
+def detect_type(block, outgoing):
+    b = block.upper()
+    if "SBD" in b and not outgoing:
         return "СЕПА ПОЛУЧЕН"
-    if "SBC" in b:
+    if "SBC" in b or ("SBD" in b and outgoing):
         return "СЕПА ИЗХОДЯЩ"
-    if "ATM" in b or "ТЕГЛЕНЕ" in b:
+    if "ТЕГЛЕНЕ" in b or "ATM" in b:
         return "ATM ТЕГЛЕНЕ"
     if "TAKSA" in b or "ТАКСА" in b:
         return "ТАКСА ОБСЛУЖВАНЕ"
-    if "FT" in b:
-        return "ПРЕВОД"
     return "ПРЕВОД"
 
 def extract_reference(block):
@@ -143,17 +151,18 @@ def extract_reference(block):
 def extract_name_r(lines, idx):
     for i in range(idx+1, len(lines)):
         t = lines[i].strip()
-        if not t:
+        if any(x in t for x in ["EUR", "BGN"]):
             continue
         if re.match(r"\d{2}/\d{2}/\d{2,4}", t):
             continue
-        if "EUR" in t or "BGN" in t:
+        if re.match(r"(FT|SBD|SBC)\.", t):
             continue
         if "OT BANKA" in t.upper():
             continue
-        if re.match(r"(FT|SBD|SBC)\.", t):
+        if "ПОЛУЧЕН" in t.upper() or "ПРЕВОД" in t.upper():
             continue
-        return t
+        if len(t.split()) <= 6:
+            return t
     return ""
 
 def extract_rem_i(lines, idx, name_r):
@@ -164,7 +173,7 @@ def extract_rem_i(lines, idx, name_r):
             start = True
             continue
         if start:
-            if any(k in t.upper() for k in ["FAKT", "ФАКТ", "DOGOV", "ДОГОВ", "DOC", "ДОКУМ", "TRANSFER", "УСЛУГ"]):
+            if any(k in t.upper() for k in ["ФАКТ", "FAKT", "ДОКУМ", "DOC", "УСЛУГ", "TRANSFER", "НОМЕР"]):
                 return t
     return ""
 
@@ -226,9 +235,10 @@ def parse_statement(text):
             amt_m = re.search(r"([\-]?[0-9.,]+)\s*EUR", block)
             amount = normalize_amount(amt_m.group(1)) if amt_m else ""
 
-            tr_type = detect_type(block)
-            reference = extract_reference(block)
+            outgoing = is_outgoing(block, amount)
+            tr_type = detect_type(block, outgoing)
 
+            reference = extract_reference(block)
             name_r = extract_name_r(lines, i)
             rem_i = extract_rem_i(lines, i, name_r)
             rem_ii = extract_rem_ii(block)
@@ -240,7 +250,8 @@ def parse_statement(text):
                 "name_r": name_r,
                 "rem_i": rem_i,
                 "rem_ii": rem_ii,
-                "reference": reference
+                "reference": reference,
+                "outgoing": outgoing
             })
 
     return from_date, till_date, open_balance, close_balance, transactions
@@ -261,10 +272,10 @@ def generate_xml(iban, from_date, till_date, open_balance, close_balance, transa
         tr = ET.SubElement(root, "TRANSACTION")
         ET.SubElement(tr, "POST_DATE").text = t["date"]
 
-        if t["type"] == "СЕПА ПОЛУЧЕН":
-            ET.SubElement(tr, "AMOUNT_C").text = t["amount"]
-        else:
+        if t["outgoing"]:
             ET.SubElement(tr, "AMOUNT_D").text = t["amount"]
+        else:
+            ET.SubElement(tr, "AMOUNT_C").text = t["amount"]
 
         ET.SubElement(tr, "TR_NAME").text = t["type"]
         ET.SubElement(tr, "NAME_R").text = t["name_r"]
