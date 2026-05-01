@@ -1,88 +1,97 @@
 import streamlit as st
-import pytesseract
 from pdf2image import convert_from_bytes
-import cv2
+import easyocr
 import numpy as np
 import re
 import xml.etree.ElementTree as ET
 import pandas as pd
+import cv2
 
 # ---------------------------------------------------------
-# OCR PREPROCESSING — preserve line structure
+# EASYOCR INITIALIZATION
 # ---------------------------------------------------------
 
-def clean_text(text):
-    text = ''.join(ch for ch in text if 32 <= ord(ch) <= 126 or ch in
-                   "абвгдежзийклмнопрстуфхцчшщъьюяАБВГДЕЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЬЮЯ .,:;/()-0123456789")
-    text = re.sub(r'[\x00-\x1F\x7F]', '', text)
-    return text
+@st.cache_resource
+def load_reader():
+    return easyocr.Reader(['bg', 'en'], gpu=False)
 
-
-def preprocess_image(img):
-    # Preserve lines — no threshold, no morphology
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    gray = cv2.GaussianBlur(gray, (3,3), 0)
-    gray = cv2.equalizeHist(gray)
-    return gray
-
+reader = load_reader()
 
 # ---------------------------------------------------------
-# LINE RECONSTRUCTION — THE KEY LOGIC
+# OCR USING EASYOCR
 # ---------------------------------------------------------
-
-def reconstruct_lines(text):
-
-    # New line before date
-    text = re.sub(r"(?<!\d)(\d{2}/\d{2}/\d{2})", r"\n\1", text)
-
-    # New line before FT/SBD/SBC
-    text = re.sub(r"(FT[0-9A-Z]+)", r"\n\1", text)
-    text = re.sub(r"(SBD\.[0-9A-Z\-]+)", r"\n\1", text)
-    text = re.sub(r"(SBC\.[0-9A-Z\-]+)", r"\n\1", text)
-
-    # New line before EUR/BGN
-    text = re.sub(r"([0-9.,]+\s*EUR)", r"\n\1", text)
-    text = re.sub(r"([0-9.,]+\s*BGN)", r"\n\1", text)
-
-    # Fix glued words like BGNNAP → BGN\nNAP
-    text = re.sub(r"(BGN)([A-Z])", r"\1\n\2", text)
-    text = re.sub(r"(EUR)([A-Z])", r"\1\n\2", text)
-
-    # New line before common keywords
-    keywords = [
-        "NAP", "DANUK", "ZDRAVNI", "OSIGUROVKI",
-        "OT BANKA", "OT BAHKA", "СЧЕТОВОДНИ", "FAKTURA",
-        "ТЕГЛЕНЕ ОТ АТМ", "UBB", "DOGOVOR", "ДОГОВОР",
-        "ЕЛЕКТРОТЕХ", "IBEKSA", "HR STUDIO", "ВИОЛИНО", "ЕС ПИ ВИ"
-    ]
-    for kw in keywords:
-        text = text.replace(kw, f"\n{kw}")
-
-    # Remove double spaces
-    text = re.sub(r"[ ]{2,}", " ", text)
-
-    # Remove empty lines
-    lines = [l.strip() for l in text.split("\n") if l.strip()]
-
-    return "\n".join(lines)
-
 
 def ocr_pdf(pdf_bytes):
-    pages = convert_from_bytes(pdf_bytes, dpi=400)
+    pages = convert_from_bytes(pdf_bytes, dpi=350)
     full_text = ""
 
     for page in pages:
         img = np.array(page)
-        processed = preprocess_image(img)
-        raw = pytesseract.image_to_string(
-            processed,
-            lang="bul+eng",
-            config="--oem 1 --psm 4"   # preserve line structure
-        )
-        full_text += "\n" + raw
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        result = reader.readtext(gray, detail=0, paragraph=False)
+        full_text += "\n".join(result) + "\n"
 
     return reconstruct_lines(clean_text(full_text))
 
+# ---------------------------------------------------------
+# CLEANING
+# ---------------------------------------------------------
+
+def clean_text(text):
+    text = text.replace("ЕЦК", "EUR")
+    text = text.replace("ВСМ", "BGN")
+    text = text.replace("CENA", "СЕПА")
+    text = text.replace("СЕМА", "СЕПА")
+    text = text.replace("OT BAHKA", "OT BANKA")
+    text = text.replace("ОТ БАНКА", "OT BANKA")
+    text = text.replace("ВАН:", "IBAN:")
+    text = re.sub(r"[ ]{2,}", " ", text)
+    return text
+
+# ---------------------------------------------------------
+# LINE RECONSTRUCTION — AGGRESSIVE MODE (A)
+# ---------------------------------------------------------
+
+def reconstruct_lines(text):
+
+    # 1) New line before date
+    text = re.sub(r"(?<!\d)(\d{2}/\d{2}/\d{2})", r"\n\1", text)
+
+    # 2) New line before FT/SBD/SBC/ATM
+    text = re.sub(r"(FT[0-9A-Z]+)", r"\n\1", text)
+    text = re.sub(r"(SBD\.[0-9A-Z\-]+)", r"\n\1", text)
+    text = re.sub(r"(SBC\.[0-9A-Z\-]+)", r"\n\1", text)
+    text = re.sub(r"(8002[0-9A-Z\-]+)", r"\n\1", text)
+
+    # 3) New line before EUR/BGN
+    text = re.sub(r"([0-9.,]+\s*EUR)", r"\n\1", text)
+    text = re.sub(r"([0-9.,]+\s*BGN)", r"\n\1", text)
+
+    # 4) Fix glued words
+    text = re.sub(r"(BGN)([A-ZА-Я])", r"\1\n\2", text)
+    text = re.sub(r"(EUR)([A-ZА-Я])", r"\1\n\2", text)
+
+    # 5) New line before keywords
+    keywords = [
+        "NAP", "DANUK", "ZDRAVNI", "OSIGUROVKI",
+        "OT BANKA", "СЧЕТОВОДНИ", "FAKTURA", "ФАКТУРА",
+        "ТЕГЛЕНЕ ОТ АТМ", "UBB", "DOGOVOR", "ДОГОВОР",
+        "ЕЛЕКТРОТЕХ", "IBEKSA", "HR STUDIO", "ВИОЛИНО",
+        "ЕС ПИ ВИ", "0000000111", "Q."
+    ]
+    for kw in keywords:
+        text = re.sub(rf"({kw})", r"\n\1", text)
+
+    # 6) New line before parentheses
+    text = re.sub(r"(\()", r"\n\1", text)
+
+    # 7) Remove double spaces
+    text = re.sub(r"[ ]{2,}", " ", text)
+
+    # 8) Remove empty lines
+    lines = [l.strip() for l in text.split("\n") if l.strip()]
+
+    return "\n".join(lines)
 
 # ---------------------------------------------------------
 # PARSER HELPERS
@@ -97,7 +106,6 @@ def normalize_amount(val):
         val = "".join(parts[:-1]) + "." + parts[-1]
     return val
 
-
 def normalize_date(d):
     m = re.match(r"(\d{2})/(\d{2})/(\d{2,4})", d)
     if not m:
@@ -106,7 +114,6 @@ def normalize_date(d):
     if len(yy) == 2:
         yy = "20" + yy
     return f"{dd}/{mm}/{yy}"
-
 
 def is_outgoing(block, amount):
     b = block.upper()
@@ -120,7 +127,6 @@ def is_outgoing(block, amount):
         return True
     return False
 
-
 def detect_type(block, outgoing):
     b = block.upper()
     if "SBD" in b and not outgoing:
@@ -129,15 +135,13 @@ def detect_type(block, outgoing):
         return "СЕПА ИЗХОДЯЩ"
     if "ТЕГЛЕНЕ" in b or "ATM" in b:
         return "ATM ТЕГЛЕНЕ"
-    if "TAKSA" in b or "ТАКСА" in b:
+    if "ТАКСА" in b:
         return "ТАКСА ОБСЛУЖВАНЕ"
     return "ПРЕВОД"
-
 
 def extract_reference(block):
     m = re.search(r"(FT[0-9A-Z]+|SBD\.[0-9A-Z\-]+|SBC\.[0-9A-Z\-]+|8002[0-9A-Z\-]+)", block)
     return m.group(1) if m else ""
-
 
 def extract_name_r(lines, idx):
     for i in range(idx+1, len(lines)):
@@ -156,7 +160,6 @@ def extract_name_r(lines, idx):
             return t
     return ""
 
-
 def extract_rem_i(lines, idx, name_r):
     start = False
     for i in range(idx+1, len(lines)):
@@ -165,17 +168,15 @@ def extract_rem_i(lines, idx, name_r):
             start = True
             continue
         if start:
-            if any(k in t.upper() for k in ["ФАКТ", "FAKT", "ДОКУМ", "DOC", "УСЛУГ", "TRANSFER", "НОМЕР"]):
+            if any(k in t.upper() for k in ["ФАКТ", "FAKT", "УСЛУГ", "НОМЕР"]):
                 return t
     return ""
-
 
 def extract_rem_ii(block):
     m = re.findall(r"\b[0-9A-Z]{10,30}\b", block)
     if m:
         return m[-1]
     return ""
-
 
 # ---------------------------------------------------------
 # MAIN PARSER
@@ -222,7 +223,6 @@ def parse_statement(text):
 
     return transactions
 
-
 # ---------------------------------------------------------
 # XML GENERATOR
 # ---------------------------------------------------------
@@ -250,12 +250,11 @@ def generate_xml(iban, transactions):
     xml_str = xml_str.replace("><", ">\n<")
     return xml_str
 
-
 # ---------------------------------------------------------
 # STREAMLIT UI
 # ---------------------------------------------------------
 
-st.title("PDF → XML (ОББ формат)")
+st.title("PDF → XML (ОББ формат) — EasyOCR версия")
 
 uploaded = st.file_uploader("Качи PDF", type=["pdf"])
 
@@ -281,21 +280,13 @@ if uploaded:
         for t in trs
     ])
 
-    st.dataframe(
-        df.style.format({"Сума": lambda x: f"{x} EUR"}).apply(
-            lambda row: ["color: green" if row["Тип"] == "Кредит" else "color: red"] * len(row),
-            axis=1
-        ),
-        use_container_width=True
-    )
+    st.dataframe(df, use_container_width=True)
 
     iban = st.text_input("IBAN", "BG00XXXX00000000000000")
 
     if st.button("Генерирай XML"):
         xml_output = generate_xml(iban, trs)
-
         st.code(xml_output, language="xml")
-
         st.download_button(
             "Свали XML",
             data=xml_output.encode("utf-8"),
