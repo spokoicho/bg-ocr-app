@@ -5,39 +5,9 @@ import cv2
 import numpy as np
 import re
 import xml.etree.ElementTree as ET
-import pandas as pd
-import os
 
 # ---------------------------------------------------------
-# AUTO-DETECT TESSDATA DIR (bul.traineddata)
-# ---------------------------------------------------------
-
-POSSIBLE_TESSDATA_DIRS = [
-    "/usr/share/tesseract-ocr/4.00/tessdata/",
-    "/usr/share/tessdata/",
-    "/usr/share/tesseract-ocr/tessdata/",
-    "/usr/share/tesseract/tessdata/",
-]
-
-def find_tessdata():
-    for d in POSSIBLE_TESSDATA_DIRS:
-        if os.path.exists(os.path.join(d, "bul.traineddata")):
-            return d
-    return None
-
-tessdata_dir = find_tessdata()
-
-if tessdata_dir:
-    tess_config = f'--tessdata-dir "{tessdata_dir}" --oem 1 --psm 6'
-    lang = "bul+eng"
-else:
-    tess_config = "--oem 1 --psm 6"
-    lang = "eng"
-
-pytesseract.pytesseract.tesseract_cmd = "/usr/bin/tesseract"
-
-# ---------------------------------------------------------
-# OCR PREPROCESSING (СТАРИЯТ – по-добрият)
+# OCR PREPROCESSING
 # ---------------------------------------------------------
 
 def clean_text(text):
@@ -78,10 +48,6 @@ def preprocess_image(img):
 
     return th
 
-# ---------------------------------------------------------
-# OCR + RECONSTRUCTION (СТАРИЯТ OCR + НОВАТА РЕКОНСТРУКЦИЯ)
-# ---------------------------------------------------------
-
 def ocr_pdf(pdf_bytes):
     pages = convert_from_bytes(pdf_bytes, dpi=400)
     full_text = ""
@@ -89,51 +55,16 @@ def ocr_pdf(pdf_bytes):
     for page in pages:
         img = np.array(page)
         processed = preprocess_image(img)
-
-        text = pytesseract.image_to_string(
-            processed,
-            lang=lang,
-            config=tess_config
-        )
+        text = pytesseract.image_to_string(processed, lang="bul+eng", config="--oem 1 --psm 6")
         full_text += "\n" + text
 
-    cleaned = clean_text(full_text)
-    reconstructed = reconstruct_lines(cleaned)
-    return reconstructed
+    return clean_text(full_text)
 
 # ---------------------------------------------------------
-# LINE RECONSTRUCTION — MODE A (от новия скрипт)
+# PARSER HELPERS
 # ---------------------------------------------------------
 
-def reconstruct_lines(text: str) -> str:
-    text = re.sub(r"(?<!\d)(\d{2}/\d{2}/\d{2})", r"\n\1", text)
-    text = re.sub(r"(FT[0-9A-Z]+)", r"\n\1", text)
-    text = re.sub(r"(SBD\.[0-9A-Z\-]+)", r"\n\1", text)
-    text = re.sub(r"(SBC\.[0-9A-Z\-]+)", r"\n\1", text)
-    text = re.sub(r"(8002[0-9A-Z\-]+)", r"\n\1", text)
-    text = re.sub(r"([\-]?[0-9.,]+\s*EUR)", r"\n\1", text)
-    text = re.sub(r"([\-]?[0-9.,]+\s*BGN)", r"\n\1", text)
-    text = re.sub(r"(BGN)([A-ZА-Я])", r"\1\n\2", text)
-    text = re.sub(r"(EUR)([A-ZА-Я])", r"\1\n\2", text)
-
-    keywords = [
-        "NAP", "DANUK", "ZDRAVNI", "OSIGUROVKI",
-        "OT BANKA", "СЧЕТОВОДНИ", "FAKTURA", "ФАКТУРА",
-        "ТЕГЛЕНЕ ОТ АТМ", "UBB", "DOGOVOR", "ДОГОВОР",
-        "ЕЛЕКТРОТЕХ", "IBEKSA", "HR STUDIO", "ВИОЛИНО",
-        "ЕС ПИ ВИ", "0000000111"
-    ]
-    for kw in keywords:
-        text = re.sub(rf"({kw})", r"\n\1", text)
-
-    lines = [l.strip() for l in text.split("\n") if l.strip()]
-    return "\n".join(lines)
-
-# ---------------------------------------------------------
-# PARSER HELPERS (от новия скрипт)
-# ---------------------------------------------------------
-
-def normalize_amount(val: str) -> str:
+def normalize_amount(val):
     if not val:
         return ""
     val = val.replace(" ", "").replace(",", ".")
@@ -142,7 +73,9 @@ def normalize_amount(val: str) -> str:
         val = "".join(parts[:-1]) + "." + parts[-1]
     return val
 
-def normalize_date(d: str) -> str:
+def normalize_date(d):
+    if not d:
+        return ""
     m = re.match(r"(\d{2})/(\d{2})/(\d{2,4})", d)
     if not m:
         return d
@@ -151,87 +84,119 @@ def normalize_date(d: str) -> str:
         yy = "20" + yy
     return f"{dd}/{mm}/{yy}"
 
-def is_outgoing(block: str, amount: str) -> bool:
+def detect_type(block):
     b = block.upper()
-    if "-" in amount:
-        return True
-    if "ТЕГЛЕНЕ" in b or "ATM" in b:
-        return True
-    if "ИЗХОДЯЩ" in b:
-        return True
-    if "FT" in b and "ПОЛУЧЕН" not in b:
-        return True
-    return False
-
-def detect_type(block: str, outgoing: bool) -> str:
-    b = block.upper()
-    if "SBD" in b and not outgoing:
+    if "SBD" in b:
         return "СЕПА ПОЛУЧЕН"
-    if "SBC" in b or ("SBD" in b and outgoing):
+    if "SBC" in b:
         return "СЕПА ИЗХОДЯЩ"
-    if "ТЕГЛЕНЕ" in b or "ATM" in b:
+    if "ATM" in b or "ТЕГЛЕНЕ" in b:
         return "ATM ТЕГЛЕНЕ"
-    if "ТАКСА" in b:
+    if "TAKSA" in b or "ТАКСА" in b:
         return "ТАКСА ОБСЛУЖВАНЕ"
+    if "FT" in b:
+        return "ПРЕВОД"
     return "ПРЕВОД"
 
-def extract_reference(block: str) -> str:
+def extract_reference(block):
     m = re.search(r"(FT[0-9A-Z]+|SBD\.[0-9A-Z\-]+|SBC\.[0-9A-Z\-]+|8002[0-9A-Z\-]+)", block)
     return m.group(1) if m else ""
 
-def extract_name_r(lines, idx: int) -> str:
+def extract_name_r(lines, idx):
     for i in range(idx+1, len(lines)):
         t = lines[i].strip()
-        if any(x in t for x in ["EUR", "BGN"]):
+        if not t:
             continue
-        if re.match(r"\d{2}/\d{2}/\d{2}", t):
+        if re.match(r"\d{2}/\d{2}/\d{2,4}", t):
             continue
-        if re.match(r"(FT|SBD|SBC)", t):
+        if "EUR" in t or "BGN" in t:
             continue
         if "OT BANKA" in t.upper():
             continue
-        if len(t.split()) <= 6:
-            return t
+        if re.match(r"(FT|SBD|SBC)\.", t):
+            continue
+        return t
     return ""
 
-def extract_rem_i(lines, idx: int, name_r: str) -> str:
+def extract_rem_i(lines, idx, name_r):
     start = False
     for i in range(idx+1, len(lines)):
         t = lines[i].strip()
         if t == name_r:
             start = True
             continue
-        if start and any(k in t.upper() for k in ["ФАКТ", "FAKT", "УСЛУГ", "НОМЕР"]):
-            return t
+        if start:
+            if any(k in t.upper() for k in ["FAKT", "ФАКТ", "DOGOV", "ДОГОВ", "DOC", "ДОКУМ", "TRANSFER", "УСЛУГ"]):
+                return t
     return ""
 
-def extract_rem_ii(block: str) -> str:
+def extract_rem_ii(block):
     m = re.findall(r"\b[0-9A-Z]{10,30}\b", block)
-    return m[-1] if m else ""
+    if m:
+        return m[-1]
+    return ""
 
 # ---------------------------------------------------------
-# MAIN PARSER (от новия скрипт)
+# MAIN PARSER
 # ---------------------------------------------------------
 
-def parse_statement(text: str):
+def parse_statement(text):
+
+    # FIX 1: OCR залепя датите → добавяме нов ред преди всяка дата
+    text = re.sub(r"(?<!\d)(\d{2}/\d{2}/\d{2,4})", r"\n\1", text)
+
     lines = [l for l in text.split("\n") if l.strip()]
-    transactions = []
 
+    # period
+    m = re.search(r"ОТ\s+(\d{2}\s*[А-ЯA-Z]+\s*\d{4}).*ДО\s+(\d{2}\s*[А-ЯA-Z]+\s*\d{4})", text)
+    from_date = ""
+    till_date = ""
+    if m:
+        months = {
+            "ЯНУ": "01", "ФЕВ": "02", "МАР": "03", "АПР": "04", "МАЙ": "05",
+            "ЮНИ": "06", "ЮЛИ": "07", "АВГ": "08", "СЕП": "09", "ОКТ": "10",
+            "НОЕ": "11", "ДЕК": "12"
+        }
+        fd = m.group(1)
+        td = m.group(2)
+        def conv(d):
+            parts = d.split()
+            dd = parts[0]
+            mm = months.get(parts[1][:3].upper(), "01")
+            yy = parts[2]
+            return f"{dd}/{mm}/{yy}"
+        from_date = conv(fd)
+        till_date = conv(td)
+
+    # opening balance
+    m2 = re.search(r"Начално салдо[: ]+([0-9.,]+)", text)
+    open_balance = normalize_amount(m2.group(1)) if m2 else ""
+
+    # closing balance
+    m3 = re.search(r"Крайно салдо[: ]+([0-9.,]+)", text)
+    close_balance = normalize_amount(m3.group(1)) if m3 else ""
+
+    # transactions
+    transactions = []
     for i, line in enumerate(lines):
-        if re.match(r"^\d{2}/\d{2}/\d{2}", line):
+
+        # FIX 2: разпознаване на редове с две дати
+        if re.match(r"^\d{2}/\d{2}/\d{2,4}", line):
+
             block = line
             j = i + 1
-            while j < len(lines) and not re.match(r"^\d{2}/\d{2}/\d{2}", lines[j]):
+            while j < len(lines) and not re.match(r"^\d{2}/\d{2}/\d{2,4}", lines[j]):
                 block += "\n" + lines[j]
                 j += 1
 
-            date = normalize_date(line.split()[0])
+            date = normalize_date(re.match(r"(\d{2}/\d{2}/\d{2,4})", line).group(1))
+
             amt_m = re.search(r"([\-]?[0-9.,]+)\s*EUR", block)
             amount = normalize_amount(amt_m.group(1)) if amt_m else ""
 
-            outgoing = is_outgoing(block, amount)
-            tr_type = detect_type(block, outgoing)
+            tr_type = detect_type(block)
             reference = extract_reference(block)
+
             name_r = extract_name_r(lines, i)
             rem_i = extract_rem_i(lines, i, name_r)
             rem_ii = extract_rem_ii(block)
@@ -243,28 +208,31 @@ def parse_statement(text: str):
                 "name_r": name_r,
                 "rem_i": rem_i,
                 "rem_ii": rem_ii,
-                "reference": reference,
-                "outgoing": outgoing
+                "reference": reference
             })
 
-    return transactions
+    return from_date, till_date, open_balance, close_balance, transactions
 
 # ---------------------------------------------------------
-# XML GENERATOR (от новия скрипт)
+# XML GENERATOR
 # ---------------------------------------------------------
 
-def generate_xml(iban: str, transactions):
+def generate_xml(iban, from_date, till_date, open_balance, close_balance, transactions):
     root = ET.Element("STATEMENT")
+
     ET.SubElement(root, "IBAN_S").text = iban
+    ET.SubElement(root, "FROM_ST_DATE").text = from_date
+    ET.SubElement(root, "TILL_ST_DATE").text = till_date
+    ET.SubElement(root, "OPEN_BALANCE").text = open_balance
 
     for t in transactions:
         tr = ET.SubElement(root, "TRANSACTION")
         ET.SubElement(tr, "POST_DATE").text = t["date"]
 
-        if t["outgoing"]:
-            ET.SubElement(tr, "AMOUNT_D").text = t["amount"]
-        else:
+        if t["type"] == "СЕПА ПОЛУЧЕН":
             ET.SubElement(tr, "AMOUNT_C").text = t["amount"]
+        else:
+            ET.SubElement(tr, "AMOUNT_D").text = t["amount"]
 
         ET.SubElement(tr, "TR_NAME").text = t["type"]
         ET.SubElement(tr, "NAME_R").text = t["name_r"]
@@ -272,47 +240,32 @@ def generate_xml(iban: str, transactions):
         ET.SubElement(tr, "REM_II").text = t["rem_ii"]
         ET.SubElement(tr, "REFERENCE").text = t["reference"]
 
+    ET.SubElement(root, "CLOSE_BALANCE").text = close_balance
+
     xml_str = ET.tostring(root, encoding="utf-8").decode("utf-8")
     xml_str = xml_str.replace("><", ">\n<")
     return xml_str
 
 # ---------------------------------------------------------
-# STREAMLIT UI (от новия скрипт)
+# STREAMLIT UI
 # ---------------------------------------------------------
 
-st.title("PDF → XML (ОББ формат) — Комбиниран OCR (най-добър вариант)")
+st.title("PDF → XML (ОББ формат)")
 
 uploaded = st.file_uploader("Качи PDF", type=["pdf"])
 
 if uploaded:
     text = ocr_pdf(uploaded.read())
+    st.text_area("OCR TEXT", text, height=400)
 
-    st.subheader("OCR текст (ред по ред)")
-    st.text_area("OCR", text, height=400)
-
-    trs = parse_statement(text)
-
-    st.subheader("Визуален преглед на транзакциите")
-
-    df = pd.DataFrame([
-        {
-            "Дата": t["date"],
-            "Вид": t["type"],
-            "Наредител/Получател": t["name_r"],
-            "Основание": t["rem_i"],
-            "Сума": t["amount"],
-            "Тип": "Кредит" if not t["outgoing"] else "Дебит"
-        }
-        for t in trs
-    ])
-
-    st.dataframe(df, use_container_width=True)
-
-    iban = st.text_input("IBAN", "BG21UBBS80021081570250")
+    iban = st.text_input("IBAN", "BG00XXXX00000000000000")
 
     if st.button("Генерирай XML"):
-        xml_output = generate_xml(iban, trs)
+        from_d, till_d, open_b, close_b, trs = parse_statement(text)
+        xml_output = generate_xml(iban, from_d, till_d, open_b, close_b, trs)
+
         st.code(xml_output, language="xml")
+
         st.download_button(
             "Свали XML",
             data=xml_output.encode("utf-8"),
