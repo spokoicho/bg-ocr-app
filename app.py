@@ -5,6 +5,7 @@ import cv2
 import numpy as np
 import re
 import xml.etree.ElementTree as ET
+import pandas as pd
 
 # ---------------------------------------------------------
 # OCR PREPROCESSING
@@ -54,49 +55,6 @@ def ocr_pdf(pdf_bytes):
         full_text += "\n" + text
 
     return clean_text(full_text)
-
-# ---------------------------------------------------------
-# VISUAL OCR FORMATTER
-# ---------------------------------------------------------
-
-def pretty_blocks(text):
-    text = re.sub(r"(?<!\d)(\d{2}/\d{2}/\d{2,4})", r"\n\1", text)
-    text = re.sub(r"(FT[0-9A-Z]+)", r"\n\1", text)
-    text = re.sub(r"(SBD\.[0-9A-Z\-]+)", r"\n\1", text)
-    text = re.sub(r"(SBC\.[0-9A-Z\-]+)", r"\n\1", text)
-    text = re.sub(r"(ATM)", r"\nATM", text)
-    text = re.sub(r"([0-9.,]+\s*EUR)", r"\n\1", text)
-    text = re.sub(r"([0-9.,]+\s*BGN)", r"\n\1", text)
-
-    lines = [l.strip() for l in text.split("\n") if l.strip()]
-
-    blocks = []
-    current = []
-
-    for l in lines:
-        if re.match(r"^\d{2}/\d{2}/\d{2,4}", l) and current:
-            blocks.append(current)
-            current = []
-        current.append(l)
-
-    if current:
-        blocks.append(current)
-
-    formatted = ""
-    for b in blocks:
-        formatted += "### 🟦 Операция\n"
-        for line in b:
-            if re.match(r"^\d{2}/\d{2}/\d{2,4}", line):
-                formatted += f"**Дата:** {line}\n"
-            elif line.startswith(("FT", "SBD", "SBC")):
-                formatted += f"**Код:** `{line}`\n"
-            elif "EUR" in line:
-                formatted += f"**Сума:** {line}\n"
-            else:
-                formatted += f"{line}\n"
-        formatted += "\n---\n\n"
-
-    return formatted
 
 # ---------------------------------------------------------
 # PARSER HELPERS
@@ -246,105 +204,3 @@ def parse_statement(text):
             transactions.append({
                 "date": date,
                 "amount": amount,
-                "type": tr_type,
-                "name_r": name_r,
-                "rem_i": rem_i,
-                "rem_ii": rem_ii,
-                "reference": reference,
-                "outgoing": outgoing
-            })
-
-    return from_date, till_date, open_balance, close_balance, transactions
-
-# Визуален преглед на транзакциите
-st.subheader("Визуален преглед на транзакциите")
-
-import pandas as pd
-
-table_rows = []
-for t in trs:
-    row = {
-        "Дата": t["date"],
-        "Час": "",
-        "Вид": t["type"],
-        "Наредител/Получател": t["name_r"],
-        "Основание": t["rem_i"],
-        "Сума": t["amount"],
-        "Тип": "Кредит" if not t["outgoing"] else "Дебит"
-    }
-    table_rows.append(row)
-
-df = pd.DataFrame(table_rows)
-
-# Подравняване и стил
-st.dataframe(
-    df.style.format({
-        "Сума": lambda x: f"{x} EUR"
-    }).apply(
-        lambda row: ["color: green" if row["Тип"] == "Кредит" else "color: red"] * len(row),
-        axis=1
-    ),
-    use_container_width=True
-)
-
-# ---------------------------------------------------------
-# XML GENERATOR
-# ---------------------------------------------------------
-
-def generate_xml(iban, from_date, till_date, open_balance, close_balance, transactions):
-    root = ET.Element("STATEMENT")
-
-    ET.SubElement(root, "IBAN_S").text = iban
-    ET.SubElement(root, "FROM_ST_DATE").text = from_date
-    ET.SubElement(root, "TILL_ST_DATE").text = till_date
-    ET.SubElement(root, "OPEN_BALANCE").text = open_balance
-
-    for t in transactions:
-        tr = ET.SubElement(root, "TRANSACTION")
-        ET.SubElement(tr, "POST_DATE").text = t["date"]
-
-        if t["outgoing"]:
-            ET.SubElement(tr, "AMOUNT_D").text = t["amount"]
-        else:
-            ET.SubElement(tr, "AMOUNT_C").text = t["amount"]
-
-        ET.SubElement(tr, "TR_NAME").text = t["type"]
-        ET.SubElement(tr, "NAME_R").text = t["name_r"]
-        ET.SubElement(tr, "REM_I").text = t["rem_i"]
-        ET.SubElement(tr, "REM_II").text = t["rem_ii"]
-        ET.SubElement(tr, "REFERENCE").text = t["reference"]
-
-    ET.SubElement(root, "CLOSE_BALANCE").text = close_balance
-
-    xml_str = ET.tostring(root, encoding="utf-8").decode("utf-8")
-    xml_str = xml_str.replace("><", ">\n<")
-    return xml_str
-
-# ---------------------------------------------------------
-# STREAMLIT UI
-# ---------------------------------------------------------
-
-st.title("PDF → XML (ОББ формат)")
-
-uploaded = st.file_uploader("Качи PDF", type=["pdf"])
-
-if uploaded:
-    text = ocr_pdf(uploaded.read())
-
-    pretty = pretty_blocks(text)
-    st.markdown(pretty)
-
-    iban = st.text_input("IBAN", "BG00XXXX00000000000000")
-
-    if st.button("Генерирай XML"):
-        from_d, till_d, open_b, close_b, trs = parse_statement(text)
-        xml_output = generate_xml(iban, from_d, till_d, open_b, close_b, trs)
-
-        st.code(xml_output, language="xml")
-
-        st.download_button(
-            "Свали XML",
-            data=xml_output.encode("utf-8"),
-            file_name="statement.xml",
-            mime="application/xml"
-        )
