@@ -1,189 +1,114 @@
 import streamlit as st
+from streamlit_gsheets import GSheetsConnection
+import pandas as pd
 import pytesseract
 from pdf2image import convert_from_bytes
 import cv2
 import numpy as np
 import re
-import pandas as pd
 import xml.etree.ElementTree as ET
 from xml.dom import minidom
-import json
-import os
 
-# --- КОНФИГУРАЦИЯ И ПАМЕТ ---
-st.set_page_config(page_title="UBB Smart Converter", layout="wide")
-MAPPING_FILE = "smart_mappings.json"
+# --- ВРЪЗКА С GOOGLE SHEETS ---
+conn = st.connection("gsheets", type=GSheetsConnection)
 
 def load_mappings():
-    """Зарежда историята на вашите преименувания."""
-    if os.path.exists(MAPPING_FILE):
-        try:
-            with open(MAPPING_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except: return {}
-    return {}
+    """Зарежда правилата от линка, който дадохте."""
+    try:
+        df = conn.read(ttl="10s") # Четем с кратък кеш за актуалност
+        # Очакваме колони 'Original' и 'Replacement'
+        return dict(zip(df["Original"], df["Replacement"]))
+    except Exception as e:
+        st.error(f"Грешка при зареждане на таблицата: {e}")
+        return {}
 
-def save_mappings(mappings):
-    """Запаметява преименуванията за бъдещи сесии."""
-    with open(MAPPING_FILE, "w", encoding="utf-8") as f:
-        json.dump(mappings, f, ensure_ascii=False, indent=4)
+def save_mappings_to_sheets(all_mappings_dict):
+    """Записва целия обновен речник обратно в Google Sheets."""
+    new_df = pd.DataFrame([
+        {"Original": k, "Replacement": v} for k, v in all_mappings_dict.items()
+    ])
+    conn.update(data=new_df)
+    st.cache_data.clear()
 
-# Инициализация на състоянието
-if 'mappings' not in st.session_state:
-    st.session_state.mappings = load_mappings()
-if 'df' not in st.session_state:
-    st.session_state.df = None
-if 'iban' not in st.session_state:
-    st.session_state.iban = ""
-
-# --- OCR ФУНКЦИИ ---
-def preprocess_image(img):
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    denoised = cv2.fastNlMeansDenoising(gray, None, 10, 7, 21)
-    _, thresh = cv2.threshold(denoised, 180, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    return thresh
-
+# --- OCR И ПАРСВАНЕ ---
 def ocr_pdf(pdf_bytes):
-    pages = convert_from_bytes(pdf_bytes, dpi=400)
+    pages = convert_from_bytes(pdf_bytes, dpi=300)
     full_text = ""
     for page in pages:
         img = np.array(page)
-        processed = preprocess_image(img)
-        text = pytesseract.image_to_string(processed, lang="bul+eng", config='--oem 3 --psm 6')
-        full_text += text + "\n"
-    return full_text.replace("CENA", "СЕПА").replace("580.", "SBD.")
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        full_text += pytesseract.image_to_string(gray, lang="bul+eng", config='--psm 6') + "\n"
+    return full_text
 
-def parse_obb_statement(text):
-    """Парсване и автоматична замяна на текст[cite: 2, 4, 5]."""
-    iban_match = re.search(r"IBAN\s*:\s*(BG\d{2}UBBS\d{14})", text)
-    iban = iban_match.group(1) if iban_match else "Неизвестен"
-    
-    transactions = []
+def parse_statement(text, mappings):
     lines = [l.strip() for l in text.split('\n') if l.strip()]
-    
-    i = 0
-    while i < len(lines):
-        line = lines[i]
+    transactions = []
+    for i, line in enumerate(lines):
         date_match = re.match(r"^(\d{2}/\d{2}/\d{2,4})", line)
-        
         if date_match:
-            tr = {
+            # Вземаме следващите редове за детайли[cite: 2, 5]
+            raw_name = lines[i+1] if i+1 < len(lines) else ""
+            raw_rem = lines[i+2] if i+2 < len(lines) else ""
+            
+            # Прилагаме автоматичните замени[cite: 4]
+            name = mappings.get(raw_name, raw_name)
+            rem = mappings.get(raw_rem, raw_rem)
+            
+            transactions.append({
                 "ДАТА": date_match.group(1),
-                "ЧАС": "null",
-                "ВИД": "ОПЕРАЦИЯ",
-                "НАРЕДИТЕЛ/ПОЛУЧАТЕЛ": "null",
-                "ОСНОВАНИЕ": "null",
+                "ОРИГИНАЛЕН ТЕКСТ": raw_name, # Пазим го за справка при запис
+                "НАРЕДИТЕЛ/ПОЛУЧАТЕЛ": name,
+                "ОСНОВАНИЕ": rem,
                 "СУМА": 0.0,
                 "ТИП": "Дебит"
-            }
-            
-            # Извличане на сума[cite: 2, 5]
-            amt_match = re.search(r"(-?[\d\s,]+\.\d{2})\s*EUR", line.replace(",", ""))
-            if amt_match:
-                val = float(amt_match.group(1).replace(" ", ""))
-                tr["СУМА"] = val
-                tr["ТИП"] = "Кредит" if val > 0 else "Дебит"
+            })
+    return transactions
 
-            # Определяне на Вид
-            for keyword in ["СЕПА ПОЛУЧЕН", "ИЗХОДЯЩ ПРЕВОД", "МЕСЕЧНА ТАКСА", "ПРЕВАЛУТИРАНЕ", "ТЕГЛЕНЕ"]:
-                if keyword in line.upper():
-                    tr["ВИД"] = keyword
-                    break
+# --- UI ИНТЕРФЕЙС ---
+st.title("🏦 Смарт Конвертор с Google Sheets")
 
-            # Четене на следващи редове за детайли[cite: 2, 5]
-            curr_j = i + 1
-            details = []
-            while curr_j < len(lines) and not re.match(r"^\d{2}/\d{2}/\d{2}", lines[curr_j]):
-                orig_text = lines[curr_j]
-                # АВТОМАТИЧНА ЗАМЯНА: Ако текстът съществува в базата, го сменяме веднага[cite: 4]
-                replaced_text = st.session_state.mappings.get(orig_text, orig_text)
-                details.append(replaced_text)
-                curr_j += 1
-            
-            if len(details) >= 1: tr["НАРЕДИТЕЛ/ПОЛУЧАТЕЛ"] = details[0]
-            if len(details) >= 2: tr["ОСНОВАНИЕ"] = details[1]
-            
-            transactions.append(tr)
-            i = curr_j - 1
-        i += 1
-    return iban, transactions
+# Зареждаме правилата в сесията
+if 'mappings' not in st.session_state:
+    st.session_state.mappings = load_mappings()
 
-# --- UI ЧАСТ ---
-st.title("🏦 Смарт Конвертор ОББ (с памет)")
-st.markdown("Редактирайте клетките директно. Приложението ще запомни промените ви за в бъдеще[cite: 1, 4].")
+tab1, tab2 = st.tabs(["🚀 Обработка", "⚙️ База Данни"])
 
-uploaded_file = st.file_uploader("Качете банково извлечение (PDF)", type="pdf")
-
-if uploaded_file:
-    # Обработка само при ново качване
-    if st.button("🚀 Анализирай файла") or st.session_state.df is None:
-        with st.spinner('OCR обработка и прилагане на запаметени правила...'):
+with tab1:
+    uploaded_file = st.file_uploader("Качете PDF", type="pdf")
+    if uploaded_file:
+        if st.button("Анализирай"):
             raw_text = ocr_pdf(uploaded_file.read())
-            iban, trs = parse_obb_statement(raw_text)
-            st.session_state.iban = iban
-            st.session_state.df = pd.DataFrame(trs)
+            data = parse_statement(raw_text, st.session_state.mappings)
+            st.session_state.df = pd.DataFrame(data)
 
-if st.session_state.df is not None:
-    # ИНТЕРАКТИВНА ТАБЛИЦА[cite: 1, 4]
-    st.subheader("📝 Редактиране на данни")
-    edited_df = st.data_editor(
-        st.session_state.df,
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "СУМА": st.column_config.NumberColumn(format="%.2f EUR"),
-            "ТИП": st.column_config.SelectboxColumn(options=["Дебит", "Кредит"])
-        }
-    )
-
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        if st.button("💾 Запамети новите имена в паметта"):
-            # Логика за намиране на разликите и запис в mappings[cite: 4]
-            new_maps = 0
-            for i in range(len(edited_df)):
-                orig_n = st.session_state.df.iloc[i]["НАРЕДИТЕЛ/ПОЛУЧАТЕЛ"]
-                edit_n = edited_df.iloc[i]["НАРЕДИТЕЛ/ПОЛУЧАТЕЛ"]
-                if orig_n != edit_n and orig_n != "null":
-                    st.session_state.mappings[orig_n] = edit_n
-                    new_maps += 1
+        if 'df' in st.session_state:
+            # Интерактивна таблица за промени[cite: 1]
+            edited_df = st.data_editor(st.session_state.df, use_container_width=True, hide_index=True)
+            
+            if st.button("💾 Запамети новите имена завинаги"):
+                updated = False
+                for _, row in edited_df.iterrows():
+                    orig = row["ОРИГИНАЛЕН ТЕКСТ"]
+                    current = row["НАРЕДИТЕЛ/ПОЛУЧАТЕЛ"]
+                    if orig != current and orig != "":
+                        st.session_state.mappings[orig] = current
+                        updated = True
                 
-                orig_o = st.session_state.df.iloc[i]["ОСНОВАНИЕ"]
-                edit_o = edited_df.iloc[i]["ОСНОВАНИЕ"]
-                if orig_o != edit_o and orig_o != "null":
-                    st.session_state.mappings[orig_o] = edit_o
-                    new_maps += 1
-            
-            save_mappings(st.session_state.mappings)
-            st.success(f"Успешно запаметени {new_maps} нови правила за автоматична замяна!")
+                if updated:
+                    save_mappings_to_sheets(st.session_state.mappings)
+                    st.success("Правилата са изпратени в Google Sheets!")
 
-    with col2:
-        # ГЕНЕРИРАНЕ НА XML[cite: 4]
-        if st.button("⚙️ Генерирай XML"):
-            root = ET.Element("STATEMENT")
-            ET.SubElement(root, "IBAN_S").text = st.session_state.iban
-            for _, row in edited_df.iterrows():
-                t = ET.SubElement(root, "TRANSACTION")
-                ET.SubElement(t, "POST_DATE").text = row["ДАТА"]
-                tag = "AMOUNT_C" if row["ТИП"] == "Кредит" else "AMOUNT_D"
-                ET.SubElement(t, tag).text = str(abs(row["СУМА"]))
-                ET.SubElement(t, "TR_NAME").text = row["ВИД"]
-                ET.SubElement(t, "NAME_R").text = row["НАРЕДИТЕЛ/ПОЛУЧАТЕЛ"]
-                ET.SubElement(t, "REM_I").text = row["ОСНОВАНИЕ"]
-            
-            xml_str = minidom.parseString(ET.tostring(root, encoding="utf-8")).toprettyxml(indent="  ")
-            st.download_button("📥 Свали XML", xml_str, "statement_final.xml", "text/xml")
-
-    # Стилизиран преглед (подобно на image_2f7274.png)[cite: 4]
-    st.divider()
-    st.subheader("👀 Финален изглед")
-    
-    def color_rows(val):
-        color = 'green' if val > 0 else 'red'
-        return f'color: {color}; font-weight: bold'
-
-    final_view = edited_df.copy()
-    # Форматиране на сумата със знаци + / -[cite: 4]
-    final_view["СУМА"] = final_view.apply(lambda r: f"{'+' if r['СУМА'] > 0 else ''}{r['СУМА']:.2f}", axis=1)
-    st.table(final_view)
+with tab2:
+    st.subheader("Списък с всички активни правила")
+    if st.session_state.mappings:
+        # Позволяваме директна редакция на базата данни[cite: 1, 4]
+        rules_df = pd.DataFrame([
+            {"Original": k, "Replacement": v} for k, v in st.session_state.mappings.items()
+        ])
+        edited_rules = st.data_editor(rules_df, use_container_width=True, num_rows="dynamic")
+        
+        if st.button("🛠️ Обнови цялата база данни"):
+            new_map = dict(zip(edited_rules["Original"], edited_rules["Replacement"]))
+            save_mappings_to_sheets(new_map)
+            st.session_state.mappings = new_map
+            st.toast("Базата данни е синхронизирана!")
