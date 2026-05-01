@@ -1,6 +1,6 @@
 import streamlit as st
 from pdf2image import convert_from_bytes
-import easyocr
+from paddleocr import PaddleOCR
 import numpy as np
 import re
 import xml.etree.ElementTree as ET
@@ -8,17 +8,18 @@ import pandas as pd
 import cv2
 
 # ---------------------------------------------------------
-# EASYOCR INITIALIZATION
+# OCR INITIALIZATION (PaddleOCR, CPU, bg+en)
 # ---------------------------------------------------------
 
 @st.cache_resource
-def load_reader():
-    return easyocr.Reader(['bg', 'en'], gpu=False)
+def load_ocr():
+    # lang='bg' покрива кирилица; латиницата се разпознава добре и така
+    return PaddleOCR(lang='bg', use_angle_cls=True, use_gpu=False)
 
-reader = load_reader()
+ocr = load_ocr()
 
 # ---------------------------------------------------------
-# OCR USING EASYOCR
+# OCR FOR PDF (PaddleOCR)
 # ---------------------------------------------------------
 
 def ocr_pdf(pdf_bytes):
@@ -28,50 +29,69 @@ def ocr_pdf(pdf_bytes):
     for page in pages:
         img = np.array(page)
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        result = reader.readtext(gray, detail=0, paragraph=False)
-        full_text += "\n".join(result) + "\n"
+
+        # PaddleOCR очаква BGR или RGB; подаваме gray като 3-канален
+        gray_3ch = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+
+        result = ocr.ocr(gray_3ch, cls=True)
+        # result е списък от страници; за всяка страница – списък от редове
+        for line in result[0]:
+            txt = line[1][0]
+            full_text += txt + "\n"
 
     return reconstruct_lines(clean_text(full_text))
 
 # ---------------------------------------------------------
-# CLEANING
+# CLEANING & OCR FIXES
 # ---------------------------------------------------------
 
-def clean_text(text):
-    text = text.replace("ЕЦК", "EUR")
-    text = text.replace("ВСМ", "BGN")
-    text = text.replace("CENA", "СЕПА")
-    text = text.replace("СЕМА", "СЕПА")
-    text = text.replace("OT BAHKA", "OT BANKA")
-    text = text.replace("ОТ БАНКА", "OT BANKA")
-    text = text.replace("ВАН:", "IBAN:")
+def clean_text(text: str) -> str:
+    # Корекция на типични OCR грешки от банкови извлечения
+    replacements = {
+        "ЕЦК": "EUR",
+        "EЦK": "EUR",
+        "EЦК": "EUR",
+        "ECК": "EUR",
+        "ВСМ": "BGN",
+        "BСM": "BGN",
+        "CENA": "СЕПА",
+        "СЕМА": "СЕПА",
+        "OT BAHKA": "OT BANKA",
+        "ОТ БАНКА": "OT BANKA",
+        "ВАН:": "IBAN:",
+        "ВАН :": "IBAN :",
+        "АНУ": "ЯНУ",  # AHY → ЯНУ и подобни
+    }
+    for k, v in replacements.items():
+        text = text.replace(k, v)
+
+    # Нормализиране на интервали
     text = re.sub(r"[ ]{2,}", " ", text)
     return text
 
 # ---------------------------------------------------------
-# LINE RECONSTRUCTION — AGGRESSIVE MODE (A)
+# LINE RECONSTRUCTION — AGGRESSIVE (режим A)
 # ---------------------------------------------------------
 
-def reconstruct_lines(text):
-
-    # 1) New line before date
+def reconstruct_lines(text: str) -> str:
+    # 1) Нов ред преди дата
     text = re.sub(r"(?<!\d)(\d{2}/\d{2}/\d{2})", r"\n\1", text)
 
-    # 2) New line before FT/SBD/SBC/ATM
+    # 2) Нов ред преди FT/SBD/SBC/такси/реф. номера
     text = re.sub(r"(FT[0-9A-Z]+)", r"\n\1", text)
     text = re.sub(r"(SBD\.[0-9A-Z\-]+)", r"\n\1", text)
     text = re.sub(r"(SBC\.[0-9A-Z\-]+)", r"\n\1", text)
     text = re.sub(r"(8002[0-9A-Z\-]+)", r"\n\1", text)
 
-    # 3) New line before EUR/BGN
-    text = re.sub(r"([0-9.,]+\s*EUR)", r"\n\1", text)
-    text = re.sub(r"([0-9.,]+\s*BGN)", r"\n\1", text)
+    # 3) Нов ред преди сума с EUR/BGN
+    text = re.sub(r"([\-]?[0-9.,]+\s*EUR)", r"\n\1", text)
+    text = re.sub(r"([\-]?[0-9.,]+\s*BGN)", r"\n\1", text)
 
-    # 4) Fix glued words
+    # 4) Разлепяне на BGNNAP → BGN\nNAP, EURNAP → EUR\nNAP
     text = re.sub(r"(BGN)([A-ZА-Я])", r"\1\n\2", text)
     text = re.sub(r"(EUR)([A-ZА-Я])", r"\1\n\2", text)
 
-    # 5) New line before keywords
+    # 5) Нов ред преди ключови думи/блокове
     keywords = [
         "NAP", "DANUK", "ZDRAVNI", "OSIGUROVKI",
         "OT BANKA", "СЧЕТОВОДНИ", "FAKTURA", "ФАКТУРА",
@@ -82,13 +102,13 @@ def reconstruct_lines(text):
     for kw in keywords:
         text = re.sub(rf"({kw})", r"\n\1", text)
 
-    # 6) New line before parentheses
+    # 6) Нов ред преди скоби
     text = re.sub(r"(\()", r"\n\1", text)
 
-    # 7) Remove double spaces
+    # 7) Премахване на двойни интервали
     text = re.sub(r"[ ]{2,}", " ", text)
 
-    # 8) Remove empty lines
+    # 8) Премахване на празни редове
     lines = [l.strip() for l in text.split("\n") if l.strip()]
 
     return "\n".join(lines)
@@ -97,7 +117,7 @@ def reconstruct_lines(text):
 # PARSER HELPERS
 # ---------------------------------------------------------
 
-def normalize_amount(val):
+def normalize_amount(val: str) -> str:
     if not val:
         return ""
     val = val.replace(" ", "").replace(",", ".")
@@ -106,7 +126,7 @@ def normalize_amount(val):
         val = "".join(parts[:-1]) + "." + parts[-1]
     return val
 
-def normalize_date(d):
+def normalize_date(d: str) -> str:
     m = re.match(r"(\d{2})/(\d{2})/(\d{2,4})", d)
     if not m:
         return d
@@ -115,7 +135,7 @@ def normalize_date(d):
         yy = "20" + yy
     return f"{dd}/{mm}/{yy}"
 
-def is_outgoing(block, amount):
+def is_outgoing(block: str, amount: str) -> bool:
     b = block.upper()
     if "-" in amount:
         return True
@@ -127,7 +147,7 @@ def is_outgoing(block, amount):
         return True
     return False
 
-def detect_type(block, outgoing):
+def detect_type(block: str, outgoing: bool) -> str:
     b = block.upper()
     if "SBD" in b and not outgoing:
         return "СЕПА ПОЛУЧЕН"
@@ -139,18 +159,18 @@ def detect_type(block, outgoing):
         return "ТАКСА ОБСЛУЖВАНЕ"
     return "ПРЕВОД"
 
-def extract_reference(block):
+def extract_reference(block: str) -> str:
     m = re.search(r"(FT[0-9A-Z]+|SBD\.[0-9A-Z\-]+|SBC\.[0-9A-Z\-]+|8002[0-9A-Z\-]+)", block)
     return m.group(1) if m else ""
 
-def extract_name_r(lines, idx):
+def extract_name_r(lines, idx: int) -> str:
     for i in range(idx+1, len(lines)):
         t = lines[i].strip()
         if any(x in t for x in ["EUR", "BGN"]):
             continue
         if re.match(r"\d{2}/\d{2}/\d{2}", t):
             continue
-        if re.match(r"(FT|SBD|SBC)\.", t):
+        if re.match(r"(FT[0-9A-Z]+|SBD\.[0-9A-Z\-]+|SBC\.[0-9A-Z\-]+)", t):
             continue
         if "OT BANKA" in t.upper():
             continue
@@ -160,7 +180,7 @@ def extract_name_r(lines, idx):
             return t
     return ""
 
-def extract_rem_i(lines, idx, name_r):
+def extract_rem_i(lines, idx: int, name_r: str) -> str:
     start = False
     for i in range(idx+1, len(lines)):
         t = lines[i].strip()
@@ -172,7 +192,7 @@ def extract_rem_i(lines, idx, name_r):
                 return t
     return ""
 
-def extract_rem_ii(block):
+def extract_rem_ii(block: str) -> str:
     m = re.findall(r"\b[0-9A-Z]{10,30}\b", block)
     if m:
         return m[-1]
@@ -182,15 +202,12 @@ def extract_rem_ii(block):
 # MAIN PARSER
 # ---------------------------------------------------------
 
-def parse_statement(text):
-
+def parse_statement(text: str):
     lines = [l for l in text.split("\n") if l.strip()]
     transactions = []
 
     for i, line in enumerate(lines):
-
         if re.match(r"^\d{2}/\d{2}/\d{2}", line):
-
             block = line
             j = i + 1
             while j < len(lines) and not re.match(r"^\d{2}/\d{2}/\d{2}", lines[j]):
@@ -227,7 +244,7 @@ def parse_statement(text):
 # XML GENERATOR
 # ---------------------------------------------------------
 
-def generate_xml(iban, transactions):
+def generate_xml(iban: str, transactions):
     root = ET.Element("STATEMENT")
     ET.SubElement(root, "IBAN_S").text = iban
 
@@ -254,7 +271,7 @@ def generate_xml(iban, transactions):
 # STREAMLIT UI
 # ---------------------------------------------------------
 
-st.title("PDF → XML (ОББ формат) — EasyOCR версия")
+st.title("PDF → XML (ОББ формат) — PaddleOCR")
 
 uploaded = st.file_uploader("Качи PDF", type=["pdf"])
 
@@ -282,7 +299,7 @@ if uploaded:
 
     st.dataframe(df, use_container_width=True)
 
-    iban = st.text_input("IBAN", "BG00XXXX00000000000000")
+    iban = st.text_input("IBAN", "BG21UBBS80021081570250")
 
     if st.button("Генерирай XML"):
         xml_output = generate_xml(iban, trs)
