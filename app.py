@@ -26,7 +26,12 @@ def preprocess_image(img):
     return gray
 
 
-def fix_lines(text):
+# ---------------------------------------------------------
+# LINE RECONSTRUCTION — THE KEY LOGIC
+# ---------------------------------------------------------
+
+def reconstruct_lines(text):
+
     # New line before date
     text = re.sub(r"(?<!\d)(\d{2}/\d{2}/\d{2})", r"\n\1", text)
 
@@ -43,11 +48,22 @@ def fix_lines(text):
     text = re.sub(r"(BGN)([A-Z])", r"\1\n\2", text)
     text = re.sub(r"(EUR)([A-Z])", r"\1\n\2", text)
 
+    # New line before common keywords
+    keywords = [
+        "NAP", "DANUK", "ZDRAVNI", "OSIGUROVKI",
+        "OT BANKA", "OT BAHKA", "СЧЕТОВОДНИ", "FAKTURA",
+        "ТЕГЛЕНЕ ОТ АТМ", "UBB", "DOGOVOR", "ДОГОВОР",
+        "ЕЛЕКТРОТЕХ", "IBEKSA", "HR STUDIO", "ВИОЛИНО", "ЕС ПИ ВИ"
+    ]
+    for kw in keywords:
+        text = text.replace(kw, f"\n{kw}")
+
     # Remove double spaces
     text = re.sub(r"[ ]{2,}", " ", text)
 
     # Remove empty lines
     lines = [l.strip() for l in text.split("\n") if l.strip()]
+
     return "\n".join(lines)
 
 
@@ -65,7 +81,7 @@ def ocr_pdf(pdf_bytes):
         )
         full_text += "\n" + raw
 
-    return fix_lines(clean_text(full_text))
+    return reconstruct_lines(clean_text(full_text))
 
 
 # ---------------------------------------------------------
