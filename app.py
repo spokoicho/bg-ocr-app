@@ -8,7 +8,7 @@ import xml.etree.ElementTree as ET
 import pandas as pd
 
 # ---------------------------------------------------------
-# OCR PREPROCESSING
+# OCR PREPROCESSING (preserve line structure)
 # ---------------------------------------------------------
 
 def clean_text(text):
@@ -17,32 +17,35 @@ def clean_text(text):
     text = re.sub(r'[\x00-\x1F\x7F]', '', text)
     return text
 
+
 def preprocess_image(img):
+    # Preserve lines — no adaptive threshold, no morphology
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    gray = cv2.GaussianBlur(gray, (3,3), 0)
+    gray = cv2.equalizeHist(gray)
+    return gray
 
-    coords = np.column_stack(np.where(gray < 255))
-    if len(coords) > 0:
-        angle = cv2.minAreaRect(coords)[-1]
-        if angle < -45:
-            angle = -(90 + angle)
-        else:
-            angle = -angle
-        (h, w) = gray.shape[:2]
-        M = cv2.getRotationMatrix2D((w//2, h//2), angle, 1.0)
-        gray = cv2.warpAffine(gray, M, (w, h), flags=cv2.INTER_CUBIC)
 
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
-    gray = clahe.apply(gray)
+def fix_lines(text):
+    # New line before date
+    text = re.sub(r"(?<!\d)(\d{2}/\d{2}/\d{2})", r"\n\1", text)
 
-    th = cv2.adaptiveThreshold(gray,255,cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                               cv2.THRESH_BINARY,31,15)
+    # New line before FT/SBD/SBC
+    text = re.sub(r"(FT[0-9A-Z]+)", r"\n\1", text)
+    text = re.sub(r"(SBD\.[0-9A-Z\-]+)", r"\n\1", text)
+    text = re.sub(r"(SBC\.[0-9A-Z\-]+)", r"\n\1", text)
 
-    kernel = np.ones((2,2), np.uint8)
-    th = cv2.morphologyEx(th, cv2.MORPH_CLOSE, kernel)
+    # New line before EUR/BGN
+    text = re.sub(r"([0-9.,]+\s*EUR)", r"\n\1", text)
+    text = re.sub(r"([0-9.,]+\s*BGN)", r"\n\1", text)
 
-    th = cv2.fastNlMeansDenoising(th, None, 30, 7, 21)
+    # Remove double spaces
+    text = re.sub(r"[ ]{2,}", " ", text)
 
-    return th
+    # Remove empty lines
+    lines = [l.strip() for l in text.split("\n") if l.strip()]
+    return "\n".join(lines)
+
 
 def ocr_pdf(pdf_bytes):
     pages = convert_from_bytes(pdf_bytes, dpi=400)
@@ -51,10 +54,15 @@ def ocr_pdf(pdf_bytes):
     for page in pages:
         img = np.array(page)
         processed = preprocess_image(img)
-        text = pytesseract.image_to_string(processed, lang="bul+eng", config="--oem 1 --psm 6")
-        full_text += "\n" + text
+        raw = pytesseract.image_to_string(
+            processed,
+            lang="bul+eng",
+            config="--oem 1 --psm 4"   # preserve line structure
+        )
+        full_text += "\n" + raw
 
-    return clean_text(full_text)
+    return fix_lines(clean_text(full_text))
+
 
 # ---------------------------------------------------------
 # PARSER HELPERS
@@ -69,6 +77,7 @@ def normalize_amount(val):
         val = "".join(parts[:-1]) + "." + parts[-1]
     return val
 
+
 def normalize_date(d):
     m = re.match(r"(\d{2})/(\d{2})/(\d{2,4})", d)
     if not m:
@@ -77,6 +86,7 @@ def normalize_date(d):
     if len(yy) == 2:
         yy = "20" + yy
     return f"{dd}/{mm}/{yy}"
+
 
 def is_outgoing(block, amount):
     b = block.upper()
@@ -90,6 +100,7 @@ def is_outgoing(block, amount):
         return True
     return False
 
+
 def detect_type(block, outgoing):
     b = block.upper()
     if "SBD" in b and not outgoing:
@@ -102,9 +113,11 @@ def detect_type(block, outgoing):
         return "ТАКСА ОБСЛУЖВАНЕ"
     return "ПРЕВОД"
 
+
 def extract_reference(block):
     m = re.search(r"(FT[0-9A-Z]+|SBD\.[0-9A-Z\-]+|SBC\.[0-9A-Z\-]+|8002[0-9A-Z\-]+)", block)
     return m.group(1) if m else ""
+
 
 def extract_name_r(lines, idx):
     for i in range(idx+1, len(lines)):
@@ -123,6 +136,7 @@ def extract_name_r(lines, idx):
             return t
     return ""
 
+
 def extract_rem_i(lines, idx, name_r):
     start = False
     for i in range(idx+1, len(lines)):
@@ -135,11 +149,13 @@ def extract_rem_i(lines, idx, name_r):
                 return t
     return ""
 
+
 def extract_rem_ii(block):
     m = re.findall(r"\b[0-9A-Z]{10,30}\b", block)
     if m:
         return m[-1]
     return ""
+
 
 # ---------------------------------------------------------
 # MAIN PARSER
@@ -147,48 +163,21 @@ def extract_rem_ii(block):
 
 def parse_statement(text):
 
-    text = re.sub(r"(?<!\d)(\d{2}/\d{2}/\d{2,4})", r"\n\1", text)
-
     lines = [l for l in text.split("\n") if l.strip()]
 
-    m = re.search(r"ОТ\s+(\d{2}\s*[А-ЯA-Z]+\s*\d{4}).*ДО\s+(\d{2}\s*[А-ЯA-Z]+\s*\d{4})", text)
-    from_date = ""
-    till_date = ""
-    if m:
-        months = {
-            "ЯНУ": "01", "ФЕВ": "02", "МАР": "03", "АПР": "04", "МАЙ": "05",
-            "ЮНИ": "06", "ЮЛИ": "07", "АВГ": "08", "СЕП": "09", "ОКТ": "10",
-            "НОЕ": "11", "ДЕК": "12"
-        }
-        fd = m.group(1)
-        td = m.group(2)
-        def conv(d):
-            parts = d.split()
-            dd = parts[0]
-            mm = months.get(parts[1][:3].upper(), "01")
-            yy = parts[2]
-            return f"{dd}/{mm}/{yy}"
-        from_date = conv(fd)
-        till_date = conv(td)
-
-    m2 = re.search(r"Начално салдо[: ]+([0-9.,]+)", text)
-    open_balance = normalize_amount(m2.group(1)) if m2 else ""
-
-    m3 = re.search(r"Крайно салдо[: ]+([0-9.,]+)", text)
-    close_balance = normalize_amount(m3.group(1)) if m3 else ""
-
     transactions = []
+
     for i, line in enumerate(lines):
 
-        if re.match(r"^\d{2}/\d{2}/\d{2,4}", line):
+        if re.match(r"^\d{2}/\d{2}/\d{2}", line):
 
             block = line
             j = i + 1
-            while j < len(lines) and not re.match(r"^\d{2}/\d{2}/\d{2,4}", lines[j]):
+            while j < len(lines) and not re.match(r"^\d{2}/\d{2}/\d{2}", lines[j]):
                 block += "\n" + lines[j]
                 j += 1
 
-            date = normalize_date(re.match(r"(\d{2}/\d{2}/\d{2,4})", line).group(1))
+            date = normalize_date(line.split()[0])
 
             amt_m = re.search(r"([\-]?[0-9.,]+)\s*EUR", block)
             amount = normalize_amount(amt_m.group(1)) if amt_m else ""
@@ -212,19 +201,17 @@ def parse_statement(text):
                 "outgoing": outgoing
             })
 
-    return from_date, till_date, open_balance, close_balance, transactions
+    return transactions
+
 
 # ---------------------------------------------------------
 # XML GENERATOR
 # ---------------------------------------------------------
 
-def generate_xml(iban, from_date, till_date, open_balance, close_balance, transactions):
+def generate_xml(iban, transactions):
     root = ET.Element("STATEMENT")
 
     ET.SubElement(root, "IBAN_S").text = iban
-    ET.SubElement(root, "FROM_ST_DATE").text = from_date
-    ET.SubElement(root, "TILL_ST_DATE").text = till_date
-    ET.SubElement(root, "OPEN_BALANCE").text = open_balance
 
     for t in transactions:
         tr = ET.SubElement(root, "TRANSACTION")
@@ -241,11 +228,10 @@ def generate_xml(iban, from_date, till_date, open_balance, close_balance, transa
         ET.SubElement(tr, "REM_II").text = t["rem_ii"]
         ET.SubElement(tr, "REFERENCE").text = t["reference"]
 
-    ET.SubElement(root, "CLOSE_BALANCE").text = close_balance
-
     xml_str = ET.tostring(root, encoding="utf-8").decode("utf-8")
     xml_str = xml_str.replace("><", ">\n<")
     return xml_str
+
 
 # ---------------------------------------------------------
 # STREAMLIT UI
@@ -258,16 +244,15 @@ uploaded = st.file_uploader("Качи PDF", type=["pdf"])
 if uploaded:
     text = ocr_pdf(uploaded.read())
 
-    st.subheader("OCR текст")
-    st.text_area("OCR", text, height=300)
+    st.subheader("OCR текст (ред по ред)")
+    st.text_area("OCR", text, height=400)
 
-    from_d, till_d, open_b, close_b, trs = parse_statement(text)
+    trs = parse_statement(text)
 
     st.subheader("Визуален преглед на транзакциите")
 
-    table_rows = []
-    for t in trs:
-        row = {
+    df = pd.DataFrame([
+        {
             "Дата": t["date"],
             "Вид": t["type"],
             "Наредител/Получател": t["name_r"],
@@ -275,14 +260,11 @@ if uploaded:
             "Сума": t["amount"],
             "Тип": "Кредит" if not t["outgoing"] else "Дебит"
         }
-        table_rows.append(row)
-
-    df = pd.DataFrame(table_rows)
+        for t in trs
+    ])
 
     st.dataframe(
-        df.style.format({
-            "Сума": lambda x: f"{x} EUR"
-        }).apply(
+        df.style.format({"Сума": lambda x: f"{x} EUR"}).apply(
             lambda row: ["color: green" if row["Тип"] == "Кредит" else "color: red"] * len(row),
             axis=1
         ),
@@ -292,7 +274,7 @@ if uploaded:
     iban = st.text_input("IBAN", "BG00XXXX00000000000000")
 
     if st.button("Генерирай XML"):
-        xml_output = generate_xml(iban, from_d, till_d, open_b, close_b, trs)
+        xml_output = generate_xml(iban, trs)
 
         st.code(xml_output, language="xml")
 
