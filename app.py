@@ -8,7 +8,14 @@ import xml.etree.ElementTree as ET
 import pandas as pd
 
 # ---------------------------------------------------------
-# OCR PREPROCESSING (минимално, за да пазим структурата)
+# TESSERACT CONFIG (Streamlit Cloud)
+# ---------------------------------------------------------
+
+pytesseract.pytesseract.tesseract_cmd = "/usr/bin/tesseract"
+tessdata_dir_config = r'--tessdata-dir "/usr/share/tesseract-ocr/4.00/tessdata/"'
+
+# ---------------------------------------------------------
+# OCR PREPROCESSING
 # ---------------------------------------------------------
 
 def preprocess_image(img):
@@ -18,7 +25,7 @@ def preprocess_image(img):
     return gray
 
 # ---------------------------------------------------------
-# OCR + РЕКОНСТРУКЦИЯ
+# OCR + RECONSTRUCTION
 # ---------------------------------------------------------
 
 def ocr_pdf(pdf_bytes):
@@ -31,9 +38,8 @@ def ocr_pdf(pdf_bytes):
 
         raw = pytesseract.image_to_string(
             proc,
-            # в Streamlit Cloud най-често има само eng
-            lang="eng",
-            config="--oem 1 --psm 4"
+            lang="bul+eng",
+            config=f"--oem 1 --psm 4 {tessdata_dir_config}"
         )
         full_text += "\n" + raw
 
@@ -46,82 +52,54 @@ def ocr_pdf(pdf_bytes):
 # ---------------------------------------------------------
 
 def clean_text(text: str) -> str:
-    # типични OCR грешки от твоите примери
     replacements = {
-        "ЕЦК": "EUR",
-        "EЦK": "EUR",
-        "EЦК": "EUR",
-        "ECК": "EUR",
-        "EC K": "EUR",
-        "ECU": "EUR",
-        "ВСМ": "BGN",
-        "BСM": "BGN",
-        "BCM": "BGN",
-        "CENA": "СЕПА",
-        "СЕМА": "СЕПА",
-        "OT BAHKA": "OT BANKA",
-        "OT BAHK A": "OT BANKA",
-        "ОТ БАНКА": "OT BANKA",
-        "ВАН:": "IBAN:",
-        "ВАН :": "IBAN :",
-        "АНУ": "ЯНУ",
-        "AHY": "ЯНУ",
+        "ЕЦК": "EUR", "ECК": "EUR", "EЦK": "EUR", "ECU": "EUR",
+        "ВСМ": "BGN", "BCM": "BGN",
+        "CENA": "СЕПА", "СЕМА": "СЕПА",
+        "OT BAHKA": "OT BANKA", "ОТ БАНКА": "OT BANKA",
+        "ВАН:": "IBAN:", "АНУ": "ЯНУ", "AHY": "ЯНУ",
         "СЧЕТОВОДНИ УСЛУГИОТ": "СЧЕТОВОДНИ УСЛУГИ OT",
-        "TEGLENE": "ТЕГЛЕНЕ",
-        "ATM": "ATM",
+        "TEGLENE": "ТЕГЛЕНЕ"
     }
     for k, v in replacements.items():
         text = text.replace(k, v)
 
-    # нормализиране на интервали
     text = re.sub(r"[ ]{2,}", " ", text)
-    # махаме control chars
     text = ''.join(ch for ch in text if ord(ch) >= 9)
     return text
 
 # ---------------------------------------------------------
-# LINE RECONSTRUCTION — АГРЕСИВЕН РЕЖИМ (A)
+# LINE RECONSTRUCTION — MODE A (AGGRESSIVE)
 # ---------------------------------------------------------
 
 def reconstruct_lines(text: str) -> str:
-    # 1) Нов ред преди дата
     text = re.sub(r"(?<!\d)(\d{2}/\d{2}/\d{2})", r"\n\1", text)
 
-    # 2) Нов ред преди FT/SBD/SBC/реф. номера
     text = re.sub(r"(FT[0-9A-Z]+)", r"\n\1", text)
     text = re.sub(r"(SBD\.[0-9A-Z\-]+)", r"\n\1", text)
     text = re.sub(r"(SBC\.[0-9A-Z\-]+)", r"\n\1", text)
     text = re.sub(r"(8002[0-9A-Z\-]+)", r"\n\1", text)
 
-    # 3) Нов ред преди сума с EUR/BGN
     text = re.sub(r"([\-]?[0-9.,]+\s*EUR)", r"\n\1", text)
     text = re.sub(r"([\-]?[0-9.,]+\s*BGN)", r"\n\1", text)
 
-    # 4) Разлепяне на BGNNAP → BGN\nNAP, EURNAP → EUR\nNAP
     text = re.sub(r"(BGN)([A-ZА-Я])", r"\1\n\2", text)
     text = re.sub(r"(EUR)([A-ZА-Я])", r"\1\n\2", text)
 
-    # 5) Нов ред преди ключови думи/блокове
     keywords = [
         "NAP", "DANUK", "ZDRAVNI", "OSIGUROVKI",
         "OT BANKA", "СЧЕТОВОДНИ", "FAKTURA", "ФАКТУРА",
         "ТЕГЛЕНЕ ОТ АТМ", "TEGLENE OT ATM", "UBB",
-        "DOGOVOR", "ДОГОВОР",
-        "ЕЛЕКТРОТЕХ", "IBEKSA", "HR STUDIO", "ВИОЛИНО",
-        "ЕС ПИ ВИ", "0000000111", "Q."
+        "DOGOVOR", "ДОГОВОР", "ЕЛЕКТРОТЕХ", "IBEKSA",
+        "HR STUDIO", "ВИОЛИНО", "ЕС ПИ ВИ", "0000000111", "Q."
     ]
     for kw in keywords:
         text = re.sub(rf"({kw})", r"\n\1", text)
 
-    # 6) Нов ред преди скоби
     text = re.sub(r"(\()", r"\n\1", text)
-
-    # 7) Премахване на двойни интервали
     text = re.sub(r"[ ]{2,}", " ", text)
 
-    # 8) Премахване на празни редове
     lines = [l.strip() for l in text.split("\n") if l.strip()]
-
     return "\n".join(lines)
 
 # ---------------------------------------------------------
@@ -150,7 +128,7 @@ def is_outgoing(block: str, amount: str) -> bool:
     b = block.upper()
     if "-" in amount:
         return True
-    if "ТЕГЛЕНЕ" in b or "TEGLENE" in b or "ATM" in b:
+    if "ТЕГЛЕНЕ" in b or "ATM" in b:
         return True
     if "ИЗХОДЯЩ" in b:
         return True
@@ -164,7 +142,7 @@ def detect_type(block: str, outgoing: bool) -> str:
         return "СЕПА ПОЛУЧЕН"
     if "SBC" in b or ("SBD" in b and outgoing):
         return "СЕПА ИЗХОДЯЩ"
-    if "ТЕГЛЕНЕ" in b or "TEGLENE" in b or "ATM" in b:
+    if "ТЕГЛЕНЕ" in b or "ATM" in b:
         return "ATM ТЕГЛЕНЕ"
     if "ТАКСА" in b:
         return "ТАКСА ОБСЛУЖВАНЕ"
@@ -181,11 +159,9 @@ def extract_name_r(lines, idx: int) -> str:
             continue
         if re.match(r"\d{2}/\d{2}/\d{2}", t):
             continue
-        if re.match(r"(FT[0-9A-Z]+|SBD\.[0-9A-Z\-]+|SBC\.[0-9A-Z\-]+)", t):
+        if re.match(r"(FT|SBD|SBC)", t):
             continue
         if "OT BANKA" in t.upper():
-            continue
-        if "ПОЛУЧЕН" in t.upper() or "ПРЕВОД" in t.upper():
             continue
         if len(t.split()) <= 6:
             return t
@@ -198,16 +174,13 @@ def extract_rem_i(lines, idx: int, name_r: str) -> str:
         if t == name_r:
             start = True
             continue
-        if start:
-            if any(k in t.upper() for k in ["ФАКТ", "FAKT", "УСЛУГ", "НОМЕР"]):
-                return t
+        if start and any(k in t.upper() for k in ["ФАКТ", "FAKT", "УСЛУГ", "НОМЕР"]):
+            return t
     return ""
 
 def extract_rem_ii(block: str) -> str:
     m = re.findall(r"\b[0-9A-Z]{10,30}\b", block)
-    if m:
-        return m[-1]
-    return ""
+    return m[-1] if m else ""
 
 # ---------------------------------------------------------
 # MAIN PARSER
@@ -226,13 +199,11 @@ def parse_statement(text: str):
                 j += 1
 
             date = normalize_date(line.split()[0])
-
             amt_m = re.search(r"([\-]?[0-9.,]+)\s*EUR", block)
             amount = normalize_amount(amt_m.group(1)) if amt_m else ""
 
             outgoing = is_outgoing(block, amount)
             tr_type = detect_type(block, outgoing)
-
             reference = extract_reference(block)
             name_r = extract_name_r(lines, i)
             rem_i = extract_rem_i(lines, i, name_r)
@@ -282,7 +253,7 @@ def generate_xml(iban: str, transactions):
 # STREAMLIT UI
 # ---------------------------------------------------------
 
-st.title("PDF → XML (ОББ формат) — Tesseract версия")
+st.title("PDF → XML (ОББ формат) — Tesseract bul+eng")
 
 uploaded = st.file_uploader("Качи PDF", type=["pdf"])
 
