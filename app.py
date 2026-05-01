@@ -6,13 +6,35 @@ import numpy as np
 import re
 import xml.etree.ElementTree as ET
 import pandas as pd
+import os
 
 # ---------------------------------------------------------
-# TESSERACT CONFIG (Streamlit Cloud)
+# AUTO-DETECT TESSDATA DIR
 # ---------------------------------------------------------
+
+POSSIBLE_TESSDATA_DIRS = [
+    "/usr/share/tesseract-ocr/4.00/tessdata/",
+    "/usr/share/tessdata/",
+    "/usr/share/tesseract-ocr/tessdata/",
+    "/usr/share/tesseract/tessdata/",
+]
+
+def find_tessdata():
+    for d in POSSIBLE_TESSDATA_DIRS:
+        if os.path.exists(os.path.join(d, "bul.traineddata")):
+            return d
+    return None
+
+tessdata_dir = find_tessdata()
+
+if tessdata_dir:
+    tess_config = f'--tessdata-dir "{tessdata_dir}" --oem 1 --psm 4'
+    lang = "bul+eng"
+else:
+    tess_config = "--oem 1 --psm 4"
+    lang = "eng"
 
 pytesseract.pytesseract.tesseract_cmd = "/usr/bin/tesseract"
-tessdata_dir_config = r'--tessdata-dir "/usr/share/tesseract-ocr/4.00/tessdata/"'
 
 # ---------------------------------------------------------
 # OCR PREPROCESSING
@@ -38,8 +60,8 @@ def ocr_pdf(pdf_bytes):
 
         raw = pytesseract.image_to_string(
             proc,
-            lang="bul+eng",
-            config=f"--oem 1 --psm 4 {tessdata_dir_config}"
+            lang=lang,
+            config=tess_config
         )
         full_text += "\n" + raw
 
@@ -58,46 +80,38 @@ def clean_text(text: str) -> str:
         "CENA": "СЕПА", "СЕМА": "СЕПА",
         "OT BAHKA": "OT BANKA", "ОТ БАНКА": "OT BANKA",
         "ВАН:": "IBAN:", "АНУ": "ЯНУ", "AHY": "ЯНУ",
-        "СЧЕТОВОДНИ УСЛУГИОТ": "СЧЕТОВОДНИ УСЛУГИ OT",
         "TEGLENE": "ТЕГЛЕНЕ"
     }
     for k, v in replacements.items():
         text = text.replace(k, v)
 
     text = re.sub(r"[ ]{2,}", " ", text)
-    text = ''.join(ch for ch in text if ord(ch) >= 9)
     return text
 
 # ---------------------------------------------------------
-# LINE RECONSTRUCTION — MODE A (AGGRESSIVE)
+# LINE RECONSTRUCTION — MODE A
 # ---------------------------------------------------------
 
 def reconstruct_lines(text: str) -> str:
     text = re.sub(r"(?<!\d)(\d{2}/\d{2}/\d{2})", r"\n\1", text)
-
     text = re.sub(r"(FT[0-9A-Z]+)", r"\n\1", text)
     text = re.sub(r"(SBD\.[0-9A-Z\-]+)", r"\n\1", text)
     text = re.sub(r"(SBC\.[0-9A-Z\-]+)", r"\n\1", text)
     text = re.sub(r"(8002[0-9A-Z\-]+)", r"\n\1", text)
-
     text = re.sub(r"([\-]?[0-9.,]+\s*EUR)", r"\n\1", text)
     text = re.sub(r"([\-]?[0-9.,]+\s*BGN)", r"\n\1", text)
-
     text = re.sub(r"(BGN)([A-ZА-Я])", r"\1\n\2", text)
     text = re.sub(r"(EUR)([A-ZА-Я])", r"\1\n\2", text)
 
     keywords = [
         "NAP", "DANUK", "ZDRAVNI", "OSIGUROVKI",
         "OT BANKA", "СЧЕТОВОДНИ", "FAKTURA", "ФАКТУРА",
-        "ТЕГЛЕНЕ ОТ АТМ", "TEGLENE OT ATM", "UBB",
-        "DOGOVOR", "ДОГОВОР", "ЕЛЕКТРОТЕХ", "IBEKSA",
-        "HR STUDIO", "ВИОЛИНО", "ЕС ПИ ВИ", "0000000111", "Q."
+        "ТЕГЛЕНЕ ОТ АТМ", "UBB", "DOGOVOR", "ДОГОВОР",
+        "ЕЛЕКТРОТЕХ", "IBEKSA", "HR STUDIO", "ВИОЛИНО",
+        "ЕС ПИ ВИ", "0000000111"
     ]
     for kw in keywords:
         text = re.sub(rf"({kw})", r"\n\1", text)
-
-    text = re.sub(r"(\()", r"\n\1", text)
-    text = re.sub(r"[ ]{2,}", " ", text)
 
     lines = [l.strip() for l in text.split("\n") if l.strip()]
     return "\n".join(lines)
@@ -253,7 +267,7 @@ def generate_xml(iban: str, transactions):
 # STREAMLIT UI
 # ---------------------------------------------------------
 
-st.title("PDF → XML (ОББ формат) — Tesseract bul+eng")
+st.title("PDF → XML (ОББ формат) — Tesseract bul+eng (auto-detect)")
 
 uploaded = st.file_uploader("Качи PDF", type=["pdf"])
 
