@@ -9,7 +9,7 @@ import pandas as pd
 import os
 
 # ---------------------------------------------------------
-# AUTO-DETECT TESSDATA DIR
+# AUTO-DETECT TESSDATA DIR (bul.traineddata)
 # ---------------------------------------------------------
 
 POSSIBLE_TESSDATA_DIRS = [
@@ -28,30 +28,50 @@ def find_tessdata():
 tessdata_dir = find_tessdata()
 
 if tessdata_dir:
-    tess_config = f'--tessdata-dir "{tessdata_dir}" --oem 1 --psm 4'
+    tess_config = f'--tessdata-dir "{tessdata_dir}" --oem 1 --psm 6'
     lang = "bul+eng"
 else:
-    tess_config = "--oem 1 --psm 4"
+    tess_config = "--oem 1 --psm 6"
     lang = "eng"
 
 pytesseract.pytesseract.tesseract_cmd = "/usr/bin/tesseract"
 
 # ---------------------------------------------------------
-# OCR PREPROCESSING
+# OCR PREPROCESSING (агресивно, за по-добро качество)
 # ---------------------------------------------------------
 
 def preprocess_image(img):
+    # 1) grayscale
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    gray = cv2.GaussianBlur(gray, (3, 3), 0)
-    gray = cv2.equalizeHist(gray)
-    return gray
+
+    # 2) denoise
+    gray = cv2.fastNlMeansDenoising(gray, h=15)
+
+    # 3) adaptive threshold
+    thr = cv2.adaptiveThreshold(
+        gray, 255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY,
+        31, 5
+    )
+
+    # 4) morphological closing
+    kernel = np.ones((2, 2), np.uint8)
+    thr = cv2.morphologyEx(thr, cv2.MORPH_CLOSE, kernel)
+
+    # 5) sharpening
+    blur = cv2.GaussianBlur(thr, (0, 0), 3)
+    sharp = cv2.addWeighted(thr, 1.5, blur, -0.5, 0)
+
+    return sharp
 
 # ---------------------------------------------------------
 # OCR + RECONSTRUCTION
 # ---------------------------------------------------------
 
 def ocr_pdf(pdf_bytes):
-    pages = convert_from_bytes(pdf_bytes, dpi=350)
+    # по-висок DPI за по-добро разпознаване
+    pages = convert_from_bytes(pdf_bytes, dpi=450)
     full_text = ""
 
     for page in pages:
@@ -89,7 +109,7 @@ def clean_text(text: str) -> str:
     return text
 
 # ---------------------------------------------------------
-# LINE RECONSTRUCTION — MODE A
+# LINE RECONSTRUCTION — MODE A (AGGRESSIVE)
 # ---------------------------------------------------------
 
 def reconstruct_lines(text: str) -> str:
@@ -267,7 +287,7 @@ def generate_xml(iban: str, transactions):
 # STREAMLIT UI
 # ---------------------------------------------------------
 
-st.title("PDF → XML (ОББ формат) — Tesseract bul+eng (auto-detect)")
+st.title("PDF → XML (ОББ формат) — Tesseract bul+eng (improved OCR)")
 
 uploaded = st.file_uploader("Качи PDF", type=["pdf"])
 
