@@ -3,4 +3,5 @@ pytesseract
 pdf2image
 opencv-python-headless
 numpy
-stgsheets-connection
+st-gsheets-connection
+pandas
