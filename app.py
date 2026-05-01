@@ -8,33 +8,33 @@ import pandas as pd
 import xml.etree.ElementTree as ET
 from xml.dom import minidom
 
-# --- КОНФИГУРАЦИЯ НА СТРАНИЦАТА ---
-st.set_page_config(page_title="UBB PDF to XML & Table", layout="wide")
+# --- КОНФИГУРАЦИЯ ---
+st.set_page_config(page_title="UBB Statement Converter", layout="wide")
 
-def preprocess_image_for_rows(img):
-    """Подобряване на изображението за по-добър OCR[cite: 1]."""
+def preprocess_image(img):
+    """Оптимизация на изображението за OCR."""
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     denoised = cv2.fastNlMeansDenoising(gray, None, 10, 7, 21)
     _, thresh = cv2.threshold(denoised, 180, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     return thresh
 
 def ocr_pdf(pdf_bytes):
-    """Конвертиране на PDF в текст с висока резолюция."""
+    """Конвертиране на PDF в текст[cite: 1, 3]."""
     pages = convert_from_bytes(pdf_bytes, dpi=400)
     full_text = ""
     for page in pages:
         img = np.array(page)
-        processed = preprocess_image_for_rows(img)
-        # PSM 6 е подходящ за таблични данни по редове[cite: 1]
+        processed = preprocess_image(img)
+        # Използваме PSM 6 за запазване на редовата структура[cite: 1]
         text = pytesseract.image_to_string(processed, lang="bul+eng", config='--oem 3 --psm 6')
         full_text += text + "\n"
     
-    # Корекция на често срещани OCR грешки[cite: 2, 3]
+    # Корекция на OCR грешки[cite: 2, 3]
     full_text = full_text.replace("CENA", "СЕПА").replace("580.", "SBD.")
     return full_text
 
 def parse_obb_statement(text):
-    """Парсване на извлечения текст към структурирани трансакции."""
+    """Извличане на трансакции и IBAN[cite: 2, 5]."""
     iban_match = re.search(r"IBAN\s*:\s*(BG\d{2}UBBS\d{14})", text)
     iban = iban_match.group(1) if iban_match else "Неизвестен"
     
@@ -44,12 +44,12 @@ def parse_obb_statement(text):
     i = 0
     while i < len(lines):
         line = lines[i]
-        # Търсим начало на ред с дата (напр. 01/01/2026 или 01/01/26)[cite: 2]
-        match = re.match(r"^(\d{2}/\d{2}/\d{2,4})", line)
+        # Маски за дата: DD/MM/YYYY или DD/MM/YY[cite: 2]
+        date_match = re.match(r"^(\d{2}/\d{2}/\d{2,4})", line)
         
-        if match:
+        if date_match:
             tr = {
-                "post_date": match.group(1), 
+                "post_date": date_match.group(1), 
                 "ref": "null", 
                 "name": "null", 
                 "rem1": "null", 
@@ -58,7 +58,7 @@ def parse_obb_statement(text):
                 "type": "C"
             }
             
-            # Извличане на сума и определяне на Дебит/Кредит[cite: 2, 5]
+            # Търсене на сума (напр. -123.45 EUR)[cite: 2, 5]
             amt_match = re.search(r"(-?[\d\s,]+\.\d{2})\s*EUR", line.replace(",", ""))
             if amt_match:
                 val_str = amt_match.group(1).replace(" ", "")
@@ -66,14 +66,14 @@ def parse_obb_statement(text):
                 tr["amt"] = f"{abs(val_float):.2f}"
                 tr["type"] = "D" if val_float < 0 else "C"
             
-            # Извличане на вид операция (напр. СЕПА ПОЛУЧЕН)
-            types = ["СЕПА ПОЛУЧЕН", "ИЗХОДЯЩ ПРЕВОД СЕПА", "МЕСЕЧНА ТАКСА", "ТЕГЛЕНЕ ОТ АТМ", "ПРЕВАЛУТИРАНЕ"]
-            for t in types:
-                if t in line.upper():
-                    tr["tr_name"] = t
+            # Определяне на типа операция
+            op_types = ["СЕПА ПОЛУЧЕН", "ИЗХОДЯЩ ПРЕВОД СЕПА", "МЕСЕЧНА ТАКСА", "ТЕГЛЕНЕ ОТ АТМ", "ПРЕВАЛУТИРАНЕ"]
+            for op in op_types:
+                if op in line.upper():
+                    tr["tr_name"] = op
                     break
 
-            # Търсене на Наредител/Основание на следващите редове[cite: 2, 5]
+            # Четем следващите редове за Име и Основание[cite: 2, 5]
             curr_j = i + 1
             extra_info = []
             while curr_j < len(lines) and not re.match(r"^\d{2}/\d{2}/\d{2}", lines[curr_j]):
@@ -89,19 +89,17 @@ def parse_obb_statement(text):
         
     return iban, transactions
 
-def generate_xml_final(iban, trs):
-    """Генериране на XML структура."""
+def generate_xml(iban, trs):
+    """Създаване на XML по зададената структура[cite: 4]."""
     root = ET.Element("STATEMENT")
     ET.SubElement(root, "IBAN_S").text = iban
     
     for t in trs:
         tran = ET.SubElement(root, "TRANSACTION")
         ET.SubElement(tran, "POST_DATE").text = t["post_date"]
-        # Разделяне на сумите в правилните тагове[cite: 4]
-        if t["type"] == "C":
-            ET.SubElement(tran, "AMOUNT_C").text = t["amt"]
-        else:
-            ET.SubElement(tran, "AMOUNT_D").text = t["amt"]
+        # AMOUNT_C за кредит, AMOUNT_D за дебит[cite: 4]
+        tag = "AMOUNT_C" if t["type"] == "C" else "AMOUNT_D"
+        ET.SubElement(tran, tag).text = t["amt"]
         
         ET.SubElement(tran, "TR_NAME").text = t["tr_name"]
         ET.SubElement(tran, "NAME_R").text = t["name"]
@@ -112,62 +110,57 @@ def generate_xml_final(iban, trs):
     return minidom.parseString(xml_str).toprettyxml(indent="  ")
 
 def display_styled_table(trs):
-    """Визуализация в таблица според примера на потребителя[cite: 1, 4]."""
+    """Визуализация с цветово кодиране (Pandas 2.1+ съвместима)[cite: 1, 4]."""
     df_data = []
     for t in trs:
-        amt_prefix = "+" if t["type"] == "C" else "-"
+        prefix = "+" if t["type"] == "C" else "-"
         df_data.append({
             "ДАТА": t["post_date"],
             "ЧАС": "null",
             "ВИД": t["tr_name"],
             "НАРЕДИТЕЛ/ПОЛУЧАТЕЛ": t["name"],
             "ОСНОВАНИЕ": t["rem1"],
-            "СУМА": f"{amt_prefix}{t['amt']}",
+            "СУМА": f"{prefix}{t['amt']}",
             "ТИП": "Кредит" if t["type"] == "C" else "Дебит"
         })
     
     df = pd.DataFrame(df_data)
 
-    def color_amounts(val):
+    def color_picker(val):
+        """Зелено за приходи, червено за разходи[cite: 4]."""
         color = 'green' if '+' in str(val) else 'red' if '-' in str(val) else 'black'
         return f'color: {color}; font-weight: bold'
 
-    styled_df = df.style.applymap(color_amounts, subset=['СУМА'])
-    st.subheader("📊 Преглед на извлечените данни")
+    # Използваме .map() за избягване на AttributeError в нови версии на Pandas[cite: 1, 4]
+    try:
+        styled_df = df.style.map(color_picker, subset=['СУМА'])
+    except AttributeError:
+        styled_df = df.style.applymap(color_picker, subset=['СУМА'])
+        
+    st.subheader("📊 Таблица с трансакции")
     st.dataframe(styled_df, use_container_width=True, hide_index=True)
 
-# --- ГЛАВЕН ИНТЕРФЕЙС ---
-st.title("🏦 ОББ Извлечение: PDF ➔ XML & Таблица")
-st.markdown("Качете вашето банково извлечение в PDF формат за автоматично преобразуване.")
+# --- ГЛАВЕН ПОТОК ---
+st.title("🏦 Конвертор на ОББ извлечения")
 
-uploaded_file = st.file_uploader("Изберете PDF файл", type="pdf")
+file = st.file_uploader("Качете PDF", type="pdf")
 
-if uploaded_file:
-    with st.spinner('Анализиране на документа...'):
-        # 1. OCR обработка[cite: 1, 3]
-        text_data = ocr_pdf(uploaded_file.read())
-        
-        # 2. Парсване[cite: 2, 5]
-        iban, transactions = parse_obb_statement(text_data)
+if file:
+    with st.spinner('Обработка...'):
+        text = ocr_pdf(file.read())
+        iban, transactions = parse_obb_statement(text)
         
         if transactions:
-            # 3. Визуализация в таблица[cite: 4]
             display_styled_table(transactions)
             
-            # 4. XML Генериране[cite: 4]
-            xml_output = generate_xml_final(iban, transactions)
+            xml_data = generate_xml(iban, transactions)
             
             st.divider()
-            col1, col2 = st.columns(2)
-            with col1:
-                st.download_button(
-                    label="📥 Свали XML файл",
-                    data=xml_output,
-                    file_name=f"OBB_Statement_{iban}.xml",
-                    mime="text/xml"
-                )
-            with col2:
-                if st.checkbox("Покажи XML код"):
-                    st.code(xml_output, language="xml")
+            st.download_button(
+                label="📥 Изтегли XML",
+                data=xml_data,
+                file_name=f"export_{iban}.xml",
+                mime="text/xml"
+            )
         else:
-            st.error("Не бяха намерени трансакции. Моля, уверете се, че PDF файлът е оригинално извлечение от ОББ.")
+            st.error("Не са открити трансакции. Проверете документа.")
