@@ -7,6 +7,7 @@ import re
 import pandas as pd
 import xml.etree.ElementTree as ET
 from xml.dom import minidom
+from datetime import datetime
 
 from name_fixes import init_db, get_fixes, save_fixes
 
@@ -14,6 +15,17 @@ from name_fixes import init_db, get_fixes, save_fixes
 st.set_page_config(page_title="UBB Statement Converter", layout="wide")
 init_db()
 
+# --- НОРМАЛИЗАЦИЯ НА ДАТА ---
+def normalize_date(date_str):
+    for fmt in ("%d/%m/%Y", "%d/%m/%y"):
+        try:
+            d = datetime.strptime(date_str, fmt)
+            return d.strftime("%d/%m/%Y")
+        except:
+            pass
+    return date_str
+
+# --- OCR ПРЕДОБРАБОТКА ---
 def preprocess_image(img):
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     denoised = cv2.fastNlMeansDenoising(gray, None, 10, 7, 21)
@@ -30,12 +42,14 @@ def ocr_pdf(pdf_bytes):
         full_text += text + "\n"
     return full_text
 
+# --- ПРИЛАГАНЕ НА КОРЕКЦИИ ---
 def apply_fixes(text):
     fixes = get_fixes()
     for original, corrected in fixes:
         text = text.replace(original, corrected)
     return text
 
+# --- ПАРСЕР ---
 def parse_obb_statement(text):
     iban_match = re.search(r"IBAN\s*:\s*(BG\d{2}UBBS\d{14})", text)
     iban = iban_match.group(1) if iban_match else "Неизвестен"
@@ -49,8 +63,11 @@ def parse_obb_statement(text):
         date_match = re.match(r"^(\d{2}/\d{2}/\d{2,4})", line)
 
         if date_match:
+            raw_date = date_match.group(1)
+            fixed_date = normalize_date(raw_date)
+
             tr = {
-                "post_date": date_match.group(1),
+                "post_date": fixed_date,
                 "name": "null",
                 "rem1": "null",
                 "tr_name": "ОПЕРАЦИЯ",
@@ -86,6 +103,7 @@ def parse_obb_statement(text):
 
     return iban, transactions
 
+# --- XML ГЕНЕРАЦИЯ ---
 def generate_xml(iban, trs):
     root = ET.Element("STATEMENT")
     ET.SubElement(root, "IBAN_S").text = iban
