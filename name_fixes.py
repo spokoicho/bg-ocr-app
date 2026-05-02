@@ -9,7 +9,7 @@ def init_db():
     c.execute("""
         CREATE TABLE IF NOT EXISTS name_fixes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            original TEXT NOT NULL,
+            original TEXT UNIQUE NOT NULL,
             corrected TEXT NOT NULL
         )
     """)
@@ -24,12 +24,20 @@ def get_fixes():
     conn.close()
     return rows
 
-def save_fixes(df):
+def save_single_fix(original, corrected):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("DELETE FROM name_fixes")
-    for _, row in df.iterrows():
-        c.execute("INSERT INTO name_fixes (original, corrected) VALUES (?, ?)",
-                  (row["original"], row["corrected"]))
+
+    # Проверяваме дали вече съществува
+    c.execute("SELECT corrected FROM name_fixes WHERE original=?", (original,))
+    row = c.fetchone()
+
+    if row:
+        # обновяване
+        c.execute("UPDATE name_fixes SET corrected=? WHERE original=?", (corrected, original))
+    else:
+        # добавяне
+        c.execute("INSERT INTO name_fixes (original, corrected) VALUES (?, ?)", (original, corrected))
+
     conn.commit()
     conn.close()
