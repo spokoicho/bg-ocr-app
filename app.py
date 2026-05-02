@@ -1,175 +1,166 @@
 import streamlit as st
-from streamlit_gsheets import GSheetsConnection
-import pandas as pd
 import pytesseract
 from pdf2image import convert_from_bytes
 import cv2
 import numpy as np
 import re
+import pandas as pd
 import xml.etree.ElementTree as ET
 from xml.dom import minidom
 
 # --- КОНФИГУРАЦИЯ ---
-# Използваме URL адреса на вашата таблица
-SHEET_URL = "https://docs.google.com/spreadsheets/d/1DxuWAgGtTwGUFxy_nntqDb_lMYbJVyTC1NSS3Rk62ps/edit?usp=sharing"
+st.set_page_config(page_title="UBB Statement Converter", layout="wide")
 
-st.set_page_config(page_title="UBB Smart Converter", layout="wide")
-
-# Инициализиране на връзката с Google Sheets
-conn = st.connection("gsheets", type=GSheetsConnection)
-
-def load_mappings():
-    """Зарежда правилата от Google Sheets при стартиране."""
-    try:
-        # Четем данните с кратък кеш за актуалност
-        df = conn.read(spreadsheet=SHEET_URL, ttl="5s")
-        if df is not None and not df.empty:
-            return dict(zip(df["Original"], df["Replacement"]))
-    except Exception as e:
-        st.error(f"Грешка при зареждане на базата данни: {e}")
-    return {}
-
-def save_mappings(mappings):
-    """Записва новите правила обратно в Google Sheets чрез Service Account."""
-    try:
-        new_df = pd.DataFrame([
-            {"Original": str(k), "Replacement": str(v)} 
-            for k, v in mappings.items()
-        ])
-        # Обновяваме Sheet1 в Google Таблицата
-        conn.update(spreadsheet=SHEET_URL, worksheet="Sheet1", data=new_df)
-        st.cache_data.clear()
-        st.success("✅ Базата данни в Google Sheets беше обновена!")
-    except Exception as e:
-        st.error(f"Грешка при запис в Google Sheets: {e}")
-
-# --- OCR И ОБРАБОТКА НА PDF ---
 def preprocess_image(img):
+    """Оптимизация на изображението за OCR."""
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    return gray
+    denoised = cv2.fastNlMeansDenoising(gray, None, 10, 7, 21)
+    _, thresh = cv2.threshold(denoised, 180, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    return thresh
 
 def ocr_pdf(pdf_bytes):
+    """Конвертиране на PDF в текст[cite: 1, 3]."""
     pages = convert_from_bytes(pdf_bytes, dpi=400)
     full_text = ""
     for page in pages:
         img = np.array(page)
         processed = preprocess_image(img)
-        full_text += pytesseract.image_to_string(processed, lang="bul+eng", config='--psm 6') + "\n"
+        # Използваме PSM 6 за запазване на редовата структура[cite: 1]
+        text = pytesseract.image_to_string(processed, lang="bul+eng", config='--oem 3 --psm 6')
+        full_text += text + "\n"
+    
+    # Корекция на OCR грешки[cite: 2, 3]
+    full_text = full_text.replace("CENA", "СЕПА").replace("580.", "SBD.")
     return full_text
 
-def parse_statement(text, mappings):
-    lines = [l.strip() for l in text.split('\n') if l.strip()]
+def parse_obb_statement(text):
+    """Извличане на трансакции и IBAN[cite: 2, 5]."""
+    iban_match = re.search(r"IBAN\s*:\s*(BG\d{2}UBBS\d{14})", text)
+    iban = iban_match.group(1) if iban_match else "Неизвестен"
+    
     transactions = []
+    lines = [l.strip() for l in text.split('\n') if l.strip()]
     
-    for i, line in enumerate(lines):
-        # Регулярен израз за дата и превръщане на 26 в 2026
-        date_match = re.match(r"^(\d{2}/\d{2}/)(\d{2,4})", line)
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        # Маски за дата: DD/MM/YYYY или DD/MM/YY[cite: 2]
+        date_match = re.match(r"^(\d{2}/\d{2}/\d{2,4})", line)
+        
         if date_match:
-            day_month = date_match.group(1)
-            year = date_match.group(2)
-            full_year = year if len(year) == 4 else f"20{year}"
-            formatted_date = f"{day_month}{full_year}"
-
-            # Извличане на сума (премахване на интервали и запетаи)
-            clean_line = line.replace(" ", "").replace(",", ".")
-            amt_match = re.search(r"(-?\d+\.\d{2})EUR", clean_line)
+            tr = {
+                "post_date": date_match.group(1), 
+                "ref": "null", 
+                "name": "null", 
+                "rem1": "null", 
+                "tr_name": "ОПЕРАЦИЯ", 
+                "amt": "0.00", 
+                "type": "C"
+            }
             
-            amount = 0.0
+            # Търсене на сума (напр. -123.45 EUR)[cite: 2, 5]
+            amt_match = re.search(r"(-?[\d\s,]+\.\d{2})\s*EUR", line.replace(",", ""))
             if amt_match:
-                amount = float(amt_match.group(1))
-
-            # Вземане на име и основание от следващите редове
-            raw_name = lines[i+1] if i+1 < len(lines) else ""
-            raw_rem = lines[i+2] if i+2 < len(lines) else ""
+                val_str = amt_match.group(1).replace(" ", "")
+                val_float = float(val_str)
+                tr["amt"] = f"{abs(val_float):.2f}"
+                tr["type"] = "D" if val_float < 0 else "C"
             
-            # Прилагане на автоматичните правила от Google Sheets
-            name = mappings.get(raw_name, raw_name)
-            rem = mappings.get(raw_rem, raw_rem)
+            # Определяне на типа операция
+            op_types = ["СЕПА ПОЛУЧЕН", "ИЗХОДЯЩ ПРЕВОД СЕПА", "МЕСЕЧНА ТАКСА", "ТЕГЛЕНЕ ОТ АТМ", "ПРЕВАЛУТИРАНЕ"]
+            for op in op_types:
+                if op in line.upper():
+                    tr["tr_name"] = op
+                    break
+
+            # Четем следващите редове за Име и Основание[cite: 2, 5]
+            curr_j = i + 1
+            extra_info = []
+            while curr_j < len(lines) and not re.match(r"^\d{2}/\d{2}/\d{2}", lines[curr_j]):
+                extra_info.append(lines[curr_j])
+                curr_j += 1
             
-            transactions.append({
-                "ДАТА": formatted_date,
-                "ОРИГИНАЛЕН ТЕКСТ": raw_name,
-                "НАРЕДИТЕЛ/ПОЛУЧАТЕЛ": name,
-                "ОСНОВАНИЕ": rem,
-                "СУМА": amount,
-                "ТИП": "Кредит" if amount > 0 else "Дебит"
-            })
-    return transactions
+            if len(extra_info) >= 1: tr["name"] = extra_info[0]
+            if len(extra_info) >= 2: tr["rem1"] = extra_info[1]
+            
+            transactions.append(tr)
+            i = curr_j - 1
+        i += 1
+        
+    return iban, transactions
 
-# --- ГЛАВЕН ИНТЕРФЕЙС ---
-st.title("🏦 UBB Smart Converter & Memory")
-
-# Зареждаме паметта в Session State
-if 'mappings' not in st.session_state:
-    st.session_state.mappings = load_mappings()
-
-tab1, tab2 = st.tabs(["🚀 Конвертиране", "⚙️ Управление на правила"])
-
-with tab1:
-    uploaded_file = st.file_uploader("Качете PDF извлечение", type="pdf")
-
-    if uploaded_file:
-        if st.button("🔍 Анализирай PDF"):
-            with st.spinner("Извличане на данни..."):
-                raw_text = ocr_pdf(uploaded_file.read())
-                data = parse_statement(raw_text, st.session_state.mappings)
-                st.session_state.df = pd.DataFrame(data)
-
-        if 'df' in st.session_state:
-            st.subheader("📝 Редактиране на резултати")
-            # Редактор на таблицата
-            edited_df = st.data_editor(
-                st.session_state.df,
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "СУМА": st.column_config.NumberColumn(format="%.2f EUR"),
-                }
-            )
-
-            if st.button("💾 Запамети промените в Google Sheets"):
-                new_rules_found = False
-                for _, row in edited_df.iterrows():
-                    orig = row["ОРИГИНАЛЕН ТЕКСТ"]
-                    curr = row["НАРЕДИТЕЛ/ПОЛУЧАТЕЛ"]
-                    if orig != curr and orig != "":
-                        st.session_state.mappings[orig] = curr
-                        new_rules_found = True
-                
-                if new_rules_found:
-                    save_mappings(st.session_state.mappings)
-                else:
-                    st.info("Няма открити нови промени за запис.")
-
-            # XML Експорт
-            if st.button("📦 Генерирай XML"):
-                root = ET.Element("STATEMENT")
-                for _, r in edited_df.iterrows():
-                    t = ET.SubElement(root, "TRANSACTION")
-                    ET.SubElement(t, "POST_DATE").text = r["ДАТА"]
-                    tag = "AMOUNT_C" if r["ТИП"] == "Кредит" else "AMOUNT_D"
-                    ET.SubElement(t, tag).text = str(abs(r["СУМА"]))
-                    ET.SubElement(t, "NAME_R").text = r["НАРЕДИТЕЛ/ПОЛУЧАТЕЛ"]
-                    ET.SubElement(t, "REM_I").text = r["ОСНОВАНИЕ"]
-                
-                xml_str = minidom.parseString(ET.tostring(root, encoding="utf-8")).toprettyxml(indent="  ")
-                st.download_button("📥 Свали XML за счетоводство", xml_str, "export.xml", "text/xml")
-
-with tab2:
-    st.subheader("📚 Всички научени правила")
-    st.write("Тук можете да редактирате или изтривате съществуващи правила директно в базата данни.")
+def generate_xml(iban, trs):
+    """Създаване на XML по зададената структура[cite: 4]."""
+    root = ET.Element("STATEMENT")
+    ET.SubElement(root, "IBAN_S").text = iban
     
-    if st.session_state.mappings:
-        rules_df = pd.DataFrame([
-            {"Original": k, "Replacement": v} 
-            for k, v in st.session_state.mappings.items()
-        ])
+    for t in trs:
+        tran = ET.SubElement(root, "TRANSACTION")
+        ET.SubElement(tran, "POST_DATE").text = t["post_date"]
+        # AMOUNT_C за кредит, AMOUNT_D за дебит[cite: 4]
+        tag = "AMOUNT_C" if t["type"] == "C" else "AMOUNT_D"
+        ET.SubElement(tran, tag).text = t["amt"]
         
-        final_rules_df = st.data_editor(rules_df, use_container_width=True, num_rows="dynamic")
+        ET.SubElement(tran, "TR_NAME").text = t["tr_name"]
+        ET.SubElement(tran, "NAME_R").text = t["name"]
+        ET.SubElement(tran, "REM_I").text = t["rem1"]
+        ET.SubElement(tran, "REFERENCE").text = t["ref"]
+
+    xml_str = ET.tostring(root, encoding="utf-8")
+    return minidom.parseString(xml_str).toprettyxml(indent="  ")
+
+def display_styled_table(trs):
+    """Визуализация с цветово кодиране (Pandas 2.1+ съвместима)[cite: 1, 4]."""
+    df_data = []
+    for t in trs:
+        prefix = "+" if t["type"] == "C" else "-"
+        df_data.append({
+            "ДАТА": t["post_date"],
+            "ЧАС": "null",
+            "ВИД": t["tr_name"],
+            "НАРЕДИТЕЛ/ПОЛУЧАТЕЛ": t["name"],
+            "ОСНОВАНИЕ": t["rem1"],
+            "СУМА": f"{prefix}{t['amt']}",
+            "ТИП": "Кредит" if t["type"] == "C" else "Дебит"
+        })
+    
+    df = pd.DataFrame(df_data)
+
+    def color_picker(val):
+        """Зелено за приходи, червено за разходи[cite: 4]."""
+        color = 'green' if '+' in str(val) else 'red' if '-' in str(val) else 'black'
+        return f'color: {color}; font-weight: bold'
+
+    # Използваме .map() за избягване на AttributeError в нови версии на Pandas[cite: 1, 4]
+    try:
+        styled_df = df.style.map(color_picker, subset=['СУМА'])
+    except AttributeError:
+        styled_df = df.style.applymap(color_picker, subset=['СУМА'])
         
-        if st.button("🛠️ Синхронизирай цялата база"):
-            updated_map = dict(zip(final_rules_df["Original"], final_rules_df["Replacement"]))
-            st.session_state.mappings = updated_map
-            save_mappings(updated_map)
-    else:
-        st.info("Няма налични правила в Google Sheets.")
+    st.subheader("📊 Таблица с трансакции")
+    st.dataframe(styled_df, use_container_width=True, hide_index=True)
+
+# --- ГЛАВЕН ПОТОК ---
+st.title("🏦 Конвертор на ОББ извлечения")
+
+file = st.file_uploader("Качете PDF", type="pdf")
+
+if file:
+    with st.spinner('Обработка...'):
+        text = ocr_pdf(file.read())
+        iban, transactions = parse_obb_statement(text)
+        
+        if transactions:
+            display_styled_table(transactions)
+            
+            xml_data = generate_xml(iban, transactions)
+            
+            st.divider()
+            st.download_button(
+                label="📥 Изтегли XML",
+                data=xml_data,
+                file_name=f"export_{iban}.xml",
+                mime="text/xml"
+            )
+        else:
+            st.error("Не са открити трансакции. Проверете документа.")
