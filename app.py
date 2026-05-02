@@ -9,7 +9,7 @@ import xml.etree.ElementTree as ET
 from xml.dom import minidom
 from datetime import datetime
 
-from name_fixes import init_db, get_fixes, save_fixes
+from name_fixes import init_db, get_fixes, save_single_fix
 
 # --- КОНФИГУРАЦИЯ ---
 st.set_page_config(page_title="UBB Statement Converter", layout="wide")
@@ -143,17 +143,21 @@ if file:
 
             if st.button("💾 Запази всички корекции"):
                 fixes = []
+
+                # сравняваме оригиналните и редактираните стойности
                 for original, corrected in zip(df["name"], edited_df["name"]):
                     if original != corrected:
                         fixes.append([original, corrected])
+
                 for original, corrected in zip(df["rem1"], edited_df["rem1"]):
                     if original != corrected:
                         fixes.append([original, corrected])
 
-                if fixes:
-                    fix_df = pd.DataFrame(fixes, columns=["original", "corrected"])
-                    save_fixes(fix_df)
-                    st.success("Корекциите са запазени!")
+                # записваме всяка корекция поотделно
+                for original, corrected in fixes:
+                    save_single_fix(original, corrected)
+
+                st.success("Корекциите са запазени!")
 
                 transactions = edited_df.to_dict(orient="records")
 
