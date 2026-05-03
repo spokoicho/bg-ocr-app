@@ -27,17 +27,11 @@ def get_fixes():
 def save_single_fix(original, corrected):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-
-    # Проверяваме дали вече съществува
     c.execute("SELECT corrected FROM name_fixes WHERE original=?", (original,))
     row = c.fetchone()
-
     if row:
-        # обновяване
         c.execute("UPDATE name_fixes SET corrected=? WHERE original=?", (corrected, original))
     else:
-        # добавяне
         c.execute("INSERT INTO name_fixes (original, corrected) VALUES (?, ?)", (original, corrected))
-
     conn.commit()
     conn.close()
