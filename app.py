@@ -10,7 +10,16 @@ from xml.dom import minidom
 from datetime import datetime
 from io import BytesIO
 import PyPDF2
-from pdfminer.high_level import extract_text
+from pdfminer.high_level import extract_pages
+from pdfminer.layout import LTTextContainer, LTChar, LTAnno, LTTextLine, LTTextBox, LTTextGroup
+
+def extract_pdf_tables(pdf_bytes):
+    text = ""
+    for page_layout in extract_pages(BytesIO(pdf_bytes)):
+        for element in page_layout:
+            if isinstance(element, LTTextContainer):
+                text += element.get_text()
+    return text
 
 from name_fixes import init_db, get_fixes, save_single_fix
 
