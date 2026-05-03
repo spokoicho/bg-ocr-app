@@ -86,36 +86,37 @@ import re
 from pdfminer.high_level import extract_text
 from io import BytesIO
 
-def parse_unicredit_pdf(pdf_bytes):
+def parse_unicredit_text(pdf_bytes):
+    # 1) Извличаме истинския PDF текст (НЕ OCR)
     text = extract_text(BytesIO(pdf_bytes))
 
-    # Вземаме само частта с таблицата "Платежни операции"
-    table_section = re.split(r"Платежни операции", text, flags=re.I)
-    if len(table_section) < 2:
+    # 2) Вземаме само частта след "Платежни операции"
+    parts = re.split(r"Платежни операции", text, flags=re.I)
+    if len(parts) < 2:
         return []
 
-    table_text = table_section[1]
+    table_text = parts[1]
 
-    # Намираме всички <tr> ... </tr>
+    # 3) Намираме всички редове <tr>...</tr>
     rows = re.findall(r"<tr>(.*?)</tr>", table_text, flags=re.S)
 
     transactions = []
-    buffer_row = None  # за rowspan втори ред
+    pending = None  # за rowspan втори ред
 
     for row in rows:
         # Вземаме всички клетки <td>...</td>
         cells = re.findall(r"<td.*?>(.*?)</td>", row, flags=re.S)
-
-        # Почистване
         cells = [re.sub(r"\s+", " ", c).strip() for c in cells]
 
         # Пропускаме заглавни редове
         if len(cells) < 3:
             continue
 
-        # Ако редът е втори ред от rowspan → добавяме към предишния
-        if buffer_row and len(cells) == 2:
-            buffer_row["description"] += " " + cells[0]
+        # Ако имаме втори ред от rowspan → добавяме към описанието
+        if pending and len(cells) == 2:
+            pending["description"] += " " + cells[0]
+            transactions.append(pending)
+            pending = None
             continue
 
         # Нормален ред или първи ред от rowspan
@@ -128,13 +129,11 @@ def parse_unicredit_pdf(pdf_bytes):
             # Номер на транзакция (ако го има)
             tr_number = cells[5] if len(cells) >= 6 else ""
 
-            # Проверка за rowspan → следващият ред ще е продължение
-            is_rowspan = "rowspan" in row
-
             # Нормализиране на дата
             m = re.match(r"(\d{2}\.\d{2}\.\d{4})", date_raw)
             if not m:
                 continue
+
             post_date = m.group(1).replace(".", "/")
 
             # Тип
@@ -143,7 +142,6 @@ def parse_unicredit_pdf(pdf_bytes):
             # EUR
             eur = eur_raw.replace(",", ".").strip()
 
-            # Създаваме транзакция
             tr = {
                 "post_date": post_date,
                 "description": description,
@@ -152,16 +150,11 @@ def parse_unicredit_pdf(pdf_bytes):
                 "number": tr_number
             }
 
-            if is_rowspan:
-                buffer_row = tr
+            # Проверка за rowspan
+            if "rowspan" in row:
+                pending = tr
             else:
                 transactions.append(tr)
-
-        # Ако предишният ред е rowspan и този ред е втори ред
-        if buffer_row and len(cells) == 1:
-            buffer_row["description"] += " " + cells[0]
-            transactions.append(buffer_row)
-            buffer_row = None
 
     return transactions
 
