@@ -10,7 +10,6 @@ from xml.dom import minidom
 from datetime import datetime
 from io import BytesIO
 import PyPDF2
-import pdfplumber
 
 from name_fixes import init_db, get_fixes, save_single_fix
 
@@ -62,19 +61,6 @@ def apply_fixes(text):
     return text
 
 # ---------------------------------------------------------
-# UNICREDIT TABLE EXTRACTOR (pdfplumber)
-# ---------------------------------------------------------
-def extract_unicredit_table(pdf_bytes):
-    rows = []
-    with pdfplumber.open(BytesIO(pdf_bytes)) as pdf:
-        for page in pdf.pages:
-            tables = page.extract_tables()
-            for table in tables:
-                for row in table:
-                    rows.append(row)
-    return rows
-
-# ---------------------------------------------------------
 # UNICREDIT NAME + REASON EXTRACTION
 # ---------------------------------------------------------
 def extract_name_and_reason(desc):
@@ -85,9 +71,7 @@ def extract_name_and_reason(desc):
 
     m = re.search(r"Контрагент\s*:?\s*([A-ZА-Я0-9\s\.\-]+)", clean)
     if m:
-        name = m.group(1).strip()
-        rem = clean
-        return name, rem
+        return m.group(1).strip(), clean
 
     m = re.search(r"Основание\s*:?\s*(.+)$", clean)
     if m:
@@ -96,57 +80,72 @@ def extract_name_and_reason(desc):
     return "null", clean
 
 # ---------------------------------------------------------
-# UNICREDIT PARSER (TABLE-BASED)
+# UNICREDIT PARSER (TEXT-BASED, STREAMLIT-CLOUD SAFE)
 # ---------------------------------------------------------
-def parse_unicredit_rows(rows):
+def parse_unicredit_text(text):
+    lines = [l.strip() for l in text.split("\n") if l.strip()]
     transactions = []
-    last = None
 
-    for r in rows:
-        if len(r) < 3:
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+
+        # 1) Detect date
+        if not re.match(r"\d{2}\.\d{2}\.\d{4}", line):
+            i += 1
             continue
 
-        date = r[0]
-        desc = r[1]
-        tr_type_raw = r[2]
-        eur = r[3] if len(r) > 3 else ""
+        post_date = normalize_date(line)
+        i += 1
 
-        # New transaction row
-        if date and re.match(r"\d{2}\.\d{2}\.\d{4}", date):
-            amt = eur.replace(",", "").strip() if eur else None
-            tr_type = "D" if ("ДТ" in tr_type_raw or "DT" in tr_type_raw) else "C"
+        # 2) Skip second date if present
+        if i < len(lines) and re.match(r"\d{2}\.\d{2}\.\d{4}", lines[i]):
+            i += 1
 
-            last = {
-                "post_date": normalize_date(date),
-                "desc": desc,
-                "type": tr_type,
-                "amt": amt
-            }
-            transactions.append(last)
+        # 3) Find type
+        tr_type = None
+        while i < len(lines):
+            if re.search(r"\b(ДТ|КТ|DT|CT)\b", lines[i]):
+                raw = lines[i]
+                tr_type = "D" if ("ДТ" in raw or "DT" in raw) else "C"
+                i += 1
+                break
+            i += 1
 
-        # Continuation row
-        else:
-            if last:
-                last["desc"] += " " + desc
-                if last["amt"] is None and eur:
-                    last["amt"] = eur.replace(",", "").strip()
+        if tr_type is None:
+            continue
 
-    # Convert to final format
-    final = []
-    for tr in transactions:
-        name, rem = extract_name_and_reason(tr["desc"])
-        tr_name = "ТЕГЛЕНЕ" if "ATM" in tr["desc"] else "ОПЕРАЦИЯ"
+        # 4) Collect description until we hit a numeric EUR amount
+        desc_parts = []
+        amt = None
 
-        final.append({
-            "post_date": tr["post_date"],
+        while i < len(lines):
+            # EUR amount must be a pure number (your requirement A)
+            if re.match(r"^\d+[\.,]\d{2}$", lines[i]):
+                amt = lines[i].replace(",", ".")
+                i += 1
+                break
+
+            desc_parts.append(lines[i])
+            i += 1
+
+        if amt is None:
+            continue
+
+        desc = " ".join(desc_parts).strip()
+        name, rem = extract_name_and_reason(desc)
+        tr_name = "ТЕГЛЕНЕ" if "ATM" in desc else "ОПЕРАЦИЯ"
+
+        transactions.append({
+            "post_date": post_date,
             "name": name,
             "rem1": rem,
             "tr_name": tr_name,
-            "amt": tr["amt"] if tr["amt"] else "0.00",
-            "type": tr["type"],
+            "amt": amt,
+            "type": tr_type,
         })
 
-    return final
+    return transactions
 
 # ---------------------------------------------------------
 # OBB PARSER (unchanged)
@@ -229,19 +228,18 @@ if file:
     with st.spinner("Обработка..."):
         pdf_bytes = file.read()
 
-        # Try UniCredit table extraction
-        rows = extract_unicredit_table(pdf_bytes)
+        # Extract text
+        text = ocr_pdf(pdf_bytes)
+        text = apply_fixes(text)
 
-        if len(rows) > 0:
+        # Detect bank
+        if "UniCredit" in text or "УниКредит" in text:
             bank = "UniCredit"
-            transactions = parse_unicredit_rows(rows)
-            iban_match = re.search(r"IBAN:?(BG\d{20})", str(rows))
+            transactions = parse_unicredit_text(text)
+            iban_match = re.search(r"IBAN:?(BG\d{20})", text)
             iban = iban_match.group(1) if iban_match else "Неизвестен"
             client_name = "Клиент"
         else:
-            # fallback to OBB
-            text = ocr_pdf(pdf_bytes)
-            text = apply_fixes(text)
             bank = "OBB"
             iban, client_name, transactions = parse_obb_statement(text)
 
