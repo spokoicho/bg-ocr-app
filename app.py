@@ -232,9 +232,10 @@ if file:
     with st.spinner("Обработка..."):
         pdf_bytes = file.read()
 
-        # Extract text
-        text = ocr_pdf(pdf_bytes)
+        text = get_pdf_text(pdf_bytes)
         text = apply_fixes(text)
+
+        st.text(text[:2000])   # ← ТУК
 
         # Detect bank
         if "UniCredit" in text or "УниКредит" in text:
