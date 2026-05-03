@@ -148,46 +148,75 @@ def extract_name_and_reason(desc):
 def parse_unicredit_statement(text):
     lines = [l.strip() for l in text.split("\n") if l.strip()]
 
+    # --- IBAN ---
     iban_match = re.search(r"IBAN:?(BG\d{20})", text)
     iban = iban_match.group(1) if iban_match else "Неизвестен"
 
-    client_match = re.search(
-        r"Получател\s*\|\s*Recipient\s*\n([A-ZА-Яa-zа-я\s]+)", text
-    )
+    # --- Клиент ---
+    client_match = re.search(r"Получател\s*\|\s*Recipient\s*\n([A-ZА-Яa-zа-я\s]+)", text)
     client_name = client_match.group(1).strip() if client_match else "Клиент"
+
+    # --- Групиране на редове в блокове ---
+    blocks = []
+    current = []
+
+    date_start = re.compile(r"^\d{2}\.\d{2}\.\d{4}")
+
+    for line in lines:
+        if date_start.match(line):
+            if current:
+                blocks.append("\n".join(current))
+            current = [line]
+        else:
+            if current:
+                current.append(line)
+
+    if current:
+        blocks.append("\n".join(current))
 
     transactions = []
 
-    row_regex = re.compile(
-        r"(\d{2}\.\d{2}\.\d{4})\s*/\s*\d{2}\.\d{2}\.\d{4}\s+(.+?)\s+(ДТ|КТ|ДТ DT|КТ CT)\s+([\d\.,]+)"
-    )
-
-    for line in lines:
-        m = row_regex.search(line)
-        if not m:
+    for block in blocks:
+        # дата
+        m_date = re.search(r"(\d{2}\.\d{2}\.\d{4})", block)
+        if not m_date:
             continue
 
-        raw_date = m.group(1)
+        raw_date = m_date.group(1)
         fixed_date = normalize_date(raw_date)
 
-        desc = m.group(2)
-        op_type_raw = m.group(3)
-        eur = m.group(4).replace(" ", "").replace(",", "")
+        # тип ДТ/КТ
+        m_type = re.search(r"\b(ДТ|КТ)\b", block)
+        if not m_type:
+            continue
 
-        op_type = "ДТ" if "ДТ" in op_type_raw else "КТ"
+        op_type = m_type.group(1)
 
-        name, rem = extract_name_and_reason(desc)
+        # сума EUR
+        m_amt = re.search(r"([\d\.,]+)\s*EUR", block)
+        if not m_amt:
+            continue
 
-        tr_name = "ОПЕРАЦИЯ"
+        amt = m_amt.group(1).replace(",", "").strip()
+
+        # описание
+        desc = block
+
+        # ATM?
         if "ATM" in desc or "Операция с карта" in desc:
+            name = "null"
+            rem = "ТЕГЛЕНЕ АТМ"
             tr_name = "ТЕГЛЕНЕ"
+        else:
+            name, rem = extract_name_and_reason(desc)
+            tr_name = "ОПЕРАЦИЯ"
 
         tr = {
             "post_date": fixed_date,
             "name": name,
             "rem1": rem,
             "tr_name": tr_name,
-            "amt": eur,
+            "amt": amt,
             "type": "D" if op_type == "ДТ" else "C",
         }
 
