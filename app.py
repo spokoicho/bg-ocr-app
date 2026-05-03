@@ -1,8 +1,4 @@
 import streamlit as st
-import pytesseract
-from pdf2image import convert_from_bytes
-import cv2
-import numpy as np
 import re
 import pandas as pd
 import xml.etree.ElementTree as ET
@@ -33,45 +29,14 @@ def normalize_date(date_str):
     return date_str
 
 # ---------------------------------------------------------
-# OCR FOR SCANNED PDF
-# ---------------------------------------------------------
-def preprocess_image(img):
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    denoised = cv2.fastNlMeansDenoising(gray, None, 10, 7, 21)
-    _, thresh = cv2.threshold(denoised, 180, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    return thresh
-
-def ocr_pdf(pdf_bytes):
-    pages = convert_from_bytes(pdf_bytes, dpi=400)
-    full_text = ""
-    for page in pages:
-        img = np.array(page)
-        processed = preprocess_image(img)
-        text = pytesseract.image_to_string(
-            processed,
-            lang="bul+eng",
-            config="--oem 3 --psm 6"
-        )
-        full_text += text + "\n"
-    return full_text
-
-# ---------------------------------------------------------
-# PDFMINER TEXT EXTRACTION
-# ---------------------------------------------------------
-def extract_pdf_text(pdf_bytes):
-    try:
-        return extract_text(BytesIO(pdf_bytes))
-    except:
-        return ""
-
-# ---------------------------------------------------------
-# HYBRID EXTRACTOR (pdfminer → OCR fallback)
+# PDF TEXT EXTRACTION (ONLY PDFMINER)
 # ---------------------------------------------------------
 def get_pdf_text(pdf_bytes):
-    text = extract_pdf_text(pdf_bytes)
-    if text and len(text.strip()) > 200:
+    try:
+        text = extract_text(BytesIO(pdf_bytes))
         return text
-    return ocr_pdf(pdf_bytes)
+    except:
+        return ""
 
 # ---------------------------------------------------------
 # APPLY FIXES
@@ -86,7 +51,6 @@ def apply_fixes(text):
 # UNICREDIT NAME + REASON EXTRACTION
 # ---------------------------------------------------------
 def extract_name_and_reason(desc):
-    # ATM → теглене, без контрагент
     if "ATM" in desc or "Операция с карта" in desc:
         return "null", "ТЕГЛЕНЕ АТМ"
 
@@ -184,7 +148,7 @@ def parse_unicredit_statement(text):
     return iban, client_name, transactions
 
 # ---------------------------------------------------------
-# OBB PARSER (опростен, но работещ)
+# OBB PARSER
 # ---------------------------------------------------------
 def parse_obb_statement(text):
     iban_match = re.search(r"IBAN\s*:\s*(BG\d{2}UBBS\d{14})", text)
