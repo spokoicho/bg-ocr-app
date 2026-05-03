@@ -319,6 +319,8 @@ if file:
         text = get_pdf_text(pdf_bytes)
         text = apply_fixes(text)
 
+        st.text(text[:2000])   # ← ТУК
+
         if "UniCredit Bulbank" in text or "УниКредит Булбанк" in text:
             bank = "UniCredit"
             iban, client_name, transactions = parse_unicredit_statement(text)
