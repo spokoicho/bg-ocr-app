@@ -9,7 +9,7 @@ import xml.etree.ElementTree as ET
 from xml.dom import minidom
 from datetime import datetime
 from io import BytesIO
-import pdfplumber
+from pdfminer.high_level import extract_text
 
 from name_fixes import init_db, get_fixes, save_single_fix
 
@@ -47,30 +47,30 @@ def ocr_pdf(pdf_bytes):
     for page in pages:
         img = np.array(page)
         processed = preprocess_image(img)
-        text = pytesseract.image_to_string(processed, lang="bul+eng", config="--oem 3 --psm 6")
+        text = pytesseract.image_to_string(
+            processed,
+            lang="bul+eng",
+            config="--oem 3 --psm 6"
+        )
         full_text += text + "\n"
     return full_text
 
 # ---------------------------------------------------------
-# PDFPLUMBER TEXT EXTRACTION
+# PDFMINER TEXT EXTRACTION
 # ---------------------------------------------------------
-def extract_pdfplumber_text(pdf_bytes):
-    text = ""
-    with pdfplumber.open(BytesIO(pdf_bytes)) as pdf:
-        for page in pdf.pages:
-            page_text = page.extract_text()
-            if page_text:
-                text += page_text + "\n"
-    return text
+def extract_pdf_text(pdf_bytes):
+    try:
+        return extract_text(BytesIO(pdf_bytes))
+    except:
+        return ""
 
 # ---------------------------------------------------------
-# HYBRID EXTRACTOR (pdfplumber → OCR fallback)
+# HYBRID EXTRACTOR (pdfminer → OCR fallback)
 # ---------------------------------------------------------
 def get_pdf_text(pdf_bytes):
-    text = extract_pdfplumber_text(pdf_bytes)
+    text = extract_pdf_text(pdf_bytes)
     if text and len(text.strip()) > 200:
         return text
-
     return ocr_pdf(pdf_bytes)
 
 # ---------------------------------------------------------
@@ -86,6 +86,7 @@ def apply_fixes(text):
 # UNICREDIT NAME + REASON EXTRACTION
 # ---------------------------------------------------------
 def extract_name_and_reason(desc):
+    # ATM → теглене, без контрагент
     if "ATM" in desc or "Операция с карта" in desc:
         return "null", "ТЕГЛЕНЕ АТМ"
 
@@ -108,7 +109,7 @@ def extract_name_and_reason(desc):
     return "null", desc
 
 # ---------------------------------------------------------
-# UNICREDIT PARSER (FINAL)
+# UNICREDIT PARSER
 # ---------------------------------------------------------
 def parse_unicredit_statement(text):
     lines = [l.strip() for l in text.split("\n") if l.strip()]
@@ -181,6 +182,57 @@ def parse_unicredit_statement(text):
         transactions.append(tr)
 
     return iban, client_name, transactions
+
+# ---------------------------------------------------------
+# OBB PARSER (опростен, но работещ)
+# ---------------------------------------------------------
+def parse_obb_statement(text):
+    iban_match = re.search(r"IBAN\s*:\s*(BG\d{2}UBBS\d{14})", text)
+    iban = iban_match.group(1) if iban_match else "Неизвестен"
+
+    transactions = []
+    lines = [l.strip() for l in text.split("\n") if l.strip()]
+
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        date_match = re.match(r"^(\d{2}/\d{2}/\d{2,4})", line)
+        if date_match:
+            raw_date = date_match.group(1)
+            fixed_date = normalize_date(raw_date)
+
+            tr = {
+                "post_date": fixed_date,
+                "name": "null",
+                "rem1": "null",
+                "tr_name": "ОПЕРАЦИЯ",
+                "amt": "0.00",
+                "type": "C",
+            }
+
+            amt_match = re.search(r"(-?[\d\s,]+\.\d{2})\s*EUR", line.replace(",", ""))
+            if amt_match:
+                val_str = amt_match.group(1).replace(" ", "")
+                val_float = float(val_str)
+                tr["amt"] = f"{abs(val_float):.2f}"
+                tr["type"] = "D" if val_float < 0 else "C"
+
+            curr_j = i + 1
+            extra_info = []
+            while curr_j < len(lines) and not re.match(r"^\d{2}/\d{2}/\d{2}", lines[curr_j]):
+                extra_info.append(lines[curr_j])
+                curr_j += 1
+
+            if len(extra_info) >= 1:
+                tr["name"] = extra_info[0]
+            if len(extra_info) >= 2:
+                tr["rem1"] = extra_info[1]
+
+            transactions.append(tr)
+            i = curr_j - 1
+        i += 1
+
+    return iban, "Клиент", transactions
 
 # ---------------------------------------------------------
 # XML GENERATION
