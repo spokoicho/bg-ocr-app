@@ -90,7 +90,7 @@ def parse_unicredit_text(text):
     while i < len(lines):
         line = lines[i]
 
-        # 1) Дата
+        # 1) Detect date
         if not re.match(r"\d{2}\.\d{2}\.\d{4}", line):
             i += 1
             continue
@@ -98,11 +98,11 @@ def parse_unicredit_text(text):
         post_date = normalize_date(line)
         i += 1
 
-        # 2) Прескачаме втория ред с дата (вальор)
+        # 2) Skip second date if present
         if i < len(lines) and re.match(r"\d{2}\.\d{2}\.\d{4}", lines[i]):
             i += 1
 
-        # 3) Тип (ДТ/КТ/DT/CT)
+        # 3) Find type
         tr_type = None
         while i < len(lines):
             if re.search(r"\b(ДТ|КТ|DT|CT)\b", lines[i]):
@@ -115,16 +115,12 @@ def parse_unicredit_text(text):
         if tr_type is None:
             continue
 
-        # 4) Прескачаме самотни символи като "/"
-        while i < len(lines) and lines[i] in ["/", "-", "|"]:
-            i += 1
-
-        # 5) Описание – събираме редове, докато НЕ стигнем сума
+        # 4) Collect description until we hit a numeric EUR amount
         desc_parts = []
         amt = None
 
         while i < len(lines):
-            # EUR сума (само число)
+            # EUR amount must be a pure number (your requirement A)
             if re.match(r"^\d+[\.,]\d{2}$", lines[i]):
                 amt = lines[i].replace(",", ".")
                 i += 1
@@ -232,10 +228,9 @@ if file:
     with st.spinner("Обработка..."):
         pdf_bytes = file.read()
 
-        text = get_pdf_text(pdf_bytes)
+        # Extract text
+        text = ocr_pdf(pdf_bytes)
         text = apply_fixes(text)
-
-        st.text(text[:2000])   # ← ТУК
 
         # Detect bank
         if "UniCredit" in text or "УниКредит" in text:
