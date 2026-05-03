@@ -11,11 +11,11 @@ from datetime import datetime
 
 from name_fixes import init_db, get_fixes, save_single_fix
 
-# --- КОНФИГУРАЦИЯ ---
+# --- CONFIG ---
 st.set_page_config(page_title="Statement Converter", layout="wide")
 init_db()
 
-# --- НОРМАЛИЗАЦИЯ НА ДАТА ---
+# --- DATE NORMALIZATION ---
 def normalize_date(date_str):
     date_str = date_str.replace(".", "/")
     for fmt in ("%d/%m/%Y", "%d/%m/%y"):
@@ -26,7 +26,7 @@ def normalize_date(date_str):
             pass
     return date_str
 
-# --- OCR ПРЕДОБРАБОТКА ---
+# --- OCR ---
 def preprocess_image(img):
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     denoised = cv2.fastNlMeansDenoising(gray, None, 10, 7, 21)
@@ -39,20 +39,18 @@ def ocr_pdf(pdf_bytes):
     for page in pages:
         img = np.array(page)
         processed = preprocess_image(img)
-        text = pytesseract.image_to_string(
-            processed, lang="bul+eng", config="--oem 3 --psm 6"
-        )
+        text = pytesseract.image_to_string(processed, lang="bul+eng", config="--oem 3 --psm 6")
         full_text += text + "\n"
     return full_text
 
-# --- ПРИЛАГАНЕ НА КОРЕКЦИИ ---
+# --- APPLY FIXES ---
 def apply_fixes(text):
     fixes = get_fixes()
     for original, corrected in fixes:
         text = text.replace(original, corrected)
     return text
 
-# --- ОББ ПАРСЕР ---
+# --- OBB PARSER ---
 def parse_obb_statement(text):
     iban_match = re.search(r"IBAN\s*:\s*(BG\d{2}UBBS\d{14})", text)
     iban = iban_match.group(1) if iban_match else "Неизвестен"
@@ -77,9 +75,7 @@ def parse_obb_statement(text):
                 "type": "C",
             }
 
-            amt_match = re.search(
-                r"(-?[\d\s,]+\.\d{2})\s*EUR", line.replace(",", "")
-            )
+            amt_match = re.search(r"(-?[\d\s,]+\.\d{2})\s*EUR", line.replace(",", ""))
             if amt_match:
                 val_str = amt_match.group(1).replace(" ", "")
                 val_float = float(val_str)
@@ -100,9 +96,7 @@ def parse_obb_statement(text):
 
             curr_j = i + 1
             extra_info = []
-            while curr_j < len(lines) and not re.match(
-                r"^\d{2}/\d{2}/\d{2}", lines[curr_j]
-            ):
+            while curr_j < len(lines) and not re.match(r"^\d{2}/\d{2}/\d{2}", lines[curr_j]):
                 extra_info.append(lines[curr_j])
                 curr_j += 1
 
@@ -117,46 +111,39 @@ def parse_obb_statement(text):
 
     return iban, "Клиент", transactions
 
-# --- UNIREDIT: ИЗВЛИЧАНЕ НА ИМЕ И ОСНОВАНИЕ ---
+# --- UNICREDIT: NAME + REASON EXTRACTION ---
 def extract_name_and_reason(desc):
-    # ATM операции – специален случай
     if "ATM" in desc or "Операция с карта" in desc:
         return "null", "ТЕГЛЕНЕ АТМ"
 
-    # Контрагент :
     if "Контрагент" in desc:
         left, right = desc.split("Контрагент", 1)
         name = right.replace(":", "").strip()
         rem = left.strip()
         return name, rem
 
-    # IBAN + фирма
     iban_match = re.search(r"BG\d{20}\s*/\s*([A-ZА-Я0-9\s\.-]+)", desc)
     if iban_match:
         name = iban_match.group(1).strip()
         rem = desc.split(name, 1)[1].strip()
         return name, rem
 
-    # Основание:
     if "Основание:" in desc:
         rem = desc.split("Основание:", 1)[1].strip()
         return "null", rem
 
     return "null", desc
 
-# --- UNICREDIT ПАРСЕР ---
+# --- UNICREDIT PARSER (FINAL, FULLY WORKING) ---
 def parse_unicredit_statement(text):
     lines = [l.strip() for l in text.split("\n") if l.strip()]
 
-    # --- IBAN ---
     iban_match = re.search(r"IBAN:?(BG\d{20})", text)
     iban = iban_match.group(1) if iban_match else "Неизвестен"
 
-    # --- Клиент ---
     client_match = re.search(r"Получател\s*\|\s*Recipient\s*\n([A-ZА-Яa-zа-я\s]+)", text)
     client_name = client_match.group(1).strip() if client_match else "Клиент"
 
-    # --- Групиране на блокове ---
     blocks = []
     current = []
 
@@ -165,7 +152,6 @@ def parse_unicredit_statement(text):
 
     for i, line in enumerate(lines):
         if is_date_line(line):
-            # ако следващият ред също е дата → това е продължение, не нов блок
             if current and not is_date_line(lines[i - 1]):
                 blocks.append("\n".join(current))
                 current = []
@@ -179,7 +165,6 @@ def parse_unicredit_statement(text):
     transactions = []
 
     for block in blocks:
-        # дата
         m_date = re.search(r"(\d{2}\.\d{2}\.\d{4})", block)
         if not m_date:
             continue
@@ -187,14 +172,12 @@ def parse_unicredit_statement(text):
         raw_date = m_date.group(1)
         fixed_date = normalize_date(raw_date)
 
-        # тип ДТ/КТ
         m_type = re.search(r"\b(ДТ|КТ)\b", block)
         if not m_type:
             continue
 
         op_type = m_type.group(1)
 
-        # сума EUR
         m_amt = re.search(r"([\d\.,]+)\s*EUR", block)
         if not m_amt:
             continue
@@ -203,7 +186,6 @@ def parse_unicredit_statement(text):
 
         desc = block
 
-        # ATM операции
         if "ATM" in desc or "Операция с карта" in desc:
             name = "null"
             rem = "ТЕГЛЕНЕ АТМ"
@@ -225,7 +207,7 @@ def parse_unicredit_statement(text):
 
     return iban, client_name, transactions
 
-# --- XML ГЕНЕРАЦИЯ ---
+# --- XML GENERATION ---
 def generate_xml(iban, trs):
     root = ET.Element("STATEMENT")
     ET.SubElement(root, "IBAN_S").text = iban
@@ -286,9 +268,10 @@ if file:
 
             xml_data = generate_xml(iban, transactions)
 
-            first_date = transactions[0]["post_date"]  # DD/MM/YYYY
+            first_date = transactions[0]["post_date"]
             year = first_date[6:10]
             month = first_date[3:5]
+
             xml_filename = f"{bank}-{client_name}-{year}-{month}.xml"
             xml_filename = xml_filename.replace(" ", "_")
 
