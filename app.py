@@ -82,56 +82,86 @@ def extract_name_and_reason(desc):
 # ---------------------------------------------------------
 # UNICREDIT PARSER (TEXT-BASED, STREAMLIT-CLOUD SAFE)
 # ---------------------------------------------------------
-def parse_unicredit_text(text):
-    lines = [l.strip() for l in text.split("\n") if l.strip()]
+import re
+from pdfminer.high_level import extract_text
+from io import BytesIO
+
+def parse_unicredit_pdf(pdf_bytes):
+    text = extract_text(BytesIO(pdf_bytes))
+
+    # Вземаме само частта с таблицата "Платежни операции"
+    table_section = re.split(r"Платежни операции", text, flags=re.I)
+    if len(table_section) < 2:
+        return []
+
+    table_text = table_section[1]
+
+    # Намираме всички <tr> ... </tr>
+    rows = re.findall(r"<tr>(.*?)</tr>", table_text, flags=re.S)
+
     transactions = []
+    buffer_row = None  # за rowspan втори ред
 
-    i = 0
-    while i < len(lines):
-        line = lines[i]
+    for row in rows:
+        # Вземаме всички клетки <td>...</td>
+        cells = re.findall(r"<td.*?>(.*?)</td>", row, flags=re.S)
 
-        # 1) Търсим ред с дата + тип
-        m = re.search(r"(\d{2}\.\d{2}\.\d{4}).*(ДТ|КТ|DT|CT)", line)
-        if not m:
-            i += 1
+        # Почистване
+        cells = [re.sub(r"\s+", " ", c).strip() for c in cells]
+
+        # Пропускаме заглавни редове
+        if len(cells) < 3:
             continue
 
-        post_date = normalize_date(m.group(1))
-        tr_type = "D" if m.group(2) in ("ДТ", "DT") else "C"
-
-        # 2) Опитваме да намерим сума в същия ред
-        amt_match = re.search(r"(\d+[\.,]\d{2})", line)
-
-        # 3) Ако няма сума → търсим в следващия ред
-        if not amt_match and i + 1 < len(lines):
-            amt_match = re.search(r"(\d+[\.,]\d{2})", lines[i+1])
-
-        if not amt_match:
-            i += 1
+        # Ако редът е втори ред от rowspan → добавяме към предишния
+        if buffer_row and len(cells) == 2:
+            buffer_row["description"] += " " + cells[0]
             continue
 
-        amt = amt_match.group(1).replace(",", ".")
+        # Нормален ред или първи ред от rowspan
+        if len(cells) >= 4:
+            date_raw = cells[0]
+            description = cells[1]
+            type_raw = cells[2]
+            eur_raw = cells[3]
 
-        # 4) Събираме описание
-        desc = line
-        j = i + 1
-        while j < len(lines) and not re.match(r"\d{2}\.\d{2}\.\d{4}", lines[j]):
-            desc += " " + lines[j]
-            j += 1
+            # Номер на транзакция (ако го има)
+            tr_number = cells[5] if len(cells) >= 6 else ""
 
-        name, rem = extract_name_and_reason(desc)
-        tr_name = "ТЕГЛЕНЕ" if "ATM" in desc else "ОПЕРАЦИЯ"
+            # Проверка за rowspan → следващият ред ще е продължение
+            is_rowspan = "rowspan" in row
 
-        transactions.append({
-            "post_date": post_date,
-            "name": name,
-            "rem1": rem,
-            "tr_name": tr_name,
-            "amt": amt,
-            "type": tr_type,
-        })
+            # Нормализиране на дата
+            m = re.match(r"(\d{2}\.\d{2}\.\d{4})", date_raw)
+            if not m:
+                continue
+            post_date = m.group(1).replace(".", "/")
 
-        i = j
+            # Тип
+            tr_type = "D" if ("ДТ" in type_raw or "DT" in type_raw) else "C"
+
+            # EUR
+            eur = eur_raw.replace(",", ".").strip()
+
+            # Създаваме транзакция
+            tr = {
+                "post_date": post_date,
+                "description": description,
+                "type": tr_type,
+                "amt": eur,
+                "number": tr_number
+            }
+
+            if is_rowspan:
+                buffer_row = tr
+            else:
+                transactions.append(tr)
+
+        # Ако предишният ред е rowspan и този ред е втори ред
+        if buffer_row and len(cells) == 1:
+            buffer_row["description"] += " " + cells[0]
+            transactions.append(buffer_row)
+            buffer_row = None
 
     return transactions
 
