@@ -140,21 +140,27 @@ def extract_name_and_reason(desc):
 def parse_unicredit_statement(text):
     lines = [l.strip() for l in text.split("\n") if l.strip()]
 
+    # -----------------------------
     # IBAN
+    # -----------------------------
     iban_match = re.search(r"IBAN:?\s*(BG\d{20})", text)
     iban = iban_match.group(1) if iban_match else "Неизвестен"
 
-    # Клиент
+    # -----------------------------
+    # Client name
+    # -----------------------------
     client_match = re.search(r"Получател\s*\|\s*Recipient\s*\n([A-ZА-Яa-zа-я\s]+)", text)
     client_name = client_match.group(1).strip() if client_match else "Клиент"
 
     transactions = []
-
     i = 0
+
     while i < len(lines):
         line = lines[i]
 
-        # 1) Търсим ред, който започва с дата
+        # -----------------------------
+        # 1) Detect transaction start (date)
+        # -----------------------------
         m = re.match(r"(\d{2}\.\d{2}\.\d{4})", line)
         if not m:
             i += 1
@@ -162,27 +168,30 @@ def parse_unicredit_statement(text):
 
         post_date = normalize_date(m.group(1))
 
-        # 2) Описание (може да е на 1 или 2 реда)
+        # -----------------------------
+        # 2) Description (may span 1–2 lines)
+        # -----------------------------
         desc = ""
-        # описание е в същия ред след "/"
+
+        # part after "/" on same line
         parts = line.split("/")
         if len(parts) > 1:
             desc = parts[1].strip()
 
-        # следващият ред може да е продължение
+        # next line may be continuation
         if i + 1 < len(lines):
             next_line = lines[i + 1]
-            # ако няма нова дата → това е продължение на описанието
             if not re.match(r"\d{2}\.\d{2}\.\d{4}", next_line):
                 desc += " " + next_line.strip()
                 i += 1
 
-        # 3) Тип (ДТ/КТ/DT/CT)
+        # -----------------------------
+        # 3) Type (ДТ/КТ/DT/CT)
+        # -----------------------------
         type_match = re.search(r"\b(ДТ|КТ|DT|CT)\b", line)
-        if not type_match:
-            # пробваме в следващия ред
-            if i + 1 < len(lines):
-                type_match = re.search(r"\b(ДТ|КТ|DT|CT)\b", lines[i + 1])
+        if not type_match and i + 1 < len(lines):
+            type_match = re.search(r"\b(ДТ|КТ|DT|CT)\b", lines[i + 1])
+
         if not type_match:
             i += 1
             continue
@@ -190,7 +199,9 @@ def parse_unicredit_statement(text):
         op_type_raw = type_match.group(1)
         tr_type = "D" if op_type_raw in ("ДТ", "DT") else "C"
 
-        # 4) Сума (EUR колоната)
+        # -----------------------------
+        # 4) Amount (EUR column)
+        # -----------------------------
         amt_match = re.search(r"(\d[\d\.,]*)$", line)
         if not amt_match and i + 1 < len(lines):
             amt_match = re.search(r"(\d[\d\.,]*)$", lines[i + 1])
@@ -206,10 +217,14 @@ def parse_unicredit_statement(text):
             i += 1
             continue
 
-        # 5) Име и основание
+        # -----------------------------
+        # 5) Name + Reason
+        # -----------------------------
         name, rem = extract_name_and_reason(desc)
 
-        # 6) ATM логика
+        # -----------------------------
+        # 6) ATM logic
+        # -----------------------------
         if "ATM" in desc or "Основание: ATM" in desc:
             name = "null"
             rem = "ТЕГЛЕНЕ АТМ"
@@ -217,6 +232,9 @@ def parse_unicredit_statement(text):
         else:
             tr_name = "ОПЕРАЦИЯ"
 
+        # -----------------------------
+        # 7) Save transaction
+        # -----------------------------
         transactions.append({
             "post_date": post_date,
             "name": name,
