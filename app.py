@@ -101,16 +101,17 @@ def parse_unicredit_text(text):
         tr_type = "D" if m.group(2) in ("ДТ", "DT") else "C"
         amt = m.group(3).replace(",", ".")
 
-        # Описание = всичко след датата в този ред
+        # Описание = този ред
         desc = line
 
         # Следващите редове са продължение на описанието,
-        # докато не срещнем нова дата
+        # докато не срещнем нова дата (начало на нова транзакция)
         j = i + 1
         while j < len(lines) and not re.match(r"\d{2}\.\d{2}\.\d{4}", lines[j]):
             desc += " " + lines[j]
             j += 1
 
+        # Извличаме име и основание
         name, rem = extract_name_and_reason(desc)
         tr_name = "ТЕГЛЕНЕ" if "ATM" in desc else "ОПЕРАЦИЯ"
 
