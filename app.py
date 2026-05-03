@@ -137,111 +137,116 @@ def extract_name_and_reason(desc):
 # ---------------------------------------------------------
 # UNICREDIT PARSER (FINAL)
 # ---------------------------------------------------------
-def parse_unicredit_v3(text):
-    # Извличане на IBAN
-    iban_m = re.search(r"IBAN:?\s*(BG\d{2}UNCR\d{14})", text)
-    iban = iban_m.group(1) if iban_m else "Неизвестен"
-    
-    # Търсим името на клиента (обикновено след Recipient)
-    client_name = "ЖИВКО ГЕНОВ" # Default по вашия текст
-    if "Recipient" in text:
-        client_parts = text.split("Recipient")[1].split("\n")
-        for line in client_parts:
-            if line.strip() and not line.startswith("|") and len(line) > 5:
-                client_name = line.strip()
-                break
+def parse_unicredit_statement(text):
+    lines = [l.strip() for l in text.split("\n") if l.strip()]
 
-    # Разбиваме на редове и почистваме
-    lines = [l.strip() for l in text.split('\n') if l.strip()]
-    
+    # -----------------------------
+    # IBAN
+    # -----------------------------
+    iban_match = re.search(r"IBAN:?\s*(BG\d{20})", text)
+    iban = iban_match.group(1) if iban_match else "Неизвестен"
+
+    # -----------------------------
+    # Client name
+    # -----------------------------
+    client_match = re.search(r"Получател\s*\|\s*Recipient\s*\n([A-ZА-Яa-zа-я\s]+)", text)
+    client_name = client_match.group(1).strip() if client_match else "Клиент"
+
     transactions = []
-    # Регулярен израз за дата в началото на реда
-    date_pattern = re.compile(r"^(\d{2}\.\d{2}\.\d{4})")
+    i = 0
 
-    current_tr = None
+    while i < len(lines):
+        line = lines[i]
 
-    for i, line in enumerate(lines):
-        # 1. Проверяваме дали редът започва с дата
-        date_match = date_pattern.match(line)
-        
-        if date_match:
-            # Ако вече имаме започната трансакция, я записваме преди новата
-            if current_tr:
-                transactions.append(current_tr)
-            
-            current_tr = {
-                "post_date": date_match.group(1),
-                "desc": [],
-                "amt": None,
-                "type": None
-            }
-            # Опитайте се да намерите сумата на същия ред
-            # В UniCredit EUR извлеченията сумата често е в края на реда с ДТ/КТ
-            amt_match = re.search(r"([\d\s,]+\.\d{2})\s*(дт|кт|DT|KT|CT|KT)", line, re.IGNORECASE)
-            if amt_match:
-                current_tr["amt"] = amt_match.group(1).replace(" ", "").replace(",", "")
-                current_tr["type"] = "D" if amt_match.group(2).upper() in ["ДТ", "DT"] else "C"
-        
-        elif current_tr:
-            # Ако не е дата, значи е част от описанието или сумата е на нов ред
-            amt_match = re.search(r"([\d\s,]+\.\d{2})\s*(дт|кт|DT|KT|CT|KT)", line, re.IGNORECASE)
-            if amt_match:
-                current_tr["amt"] = amt_match.group(1).replace(" ", "").replace(",", "")
-                current_tr["type"] = "D" if amt_match.group(2).upper() in ["ДТ", "DT"] else "C"
-            else:
-                # Добавяме към описанието само ако не е системен текст
-                if "Страница" not in line and "Салдо" not in line:
-                    current_tr["desc"].append(line)
+        # -----------------------------
+        # 1) Detect transaction start (date)
+        # -----------------------------
+        m = re.match(r"(\d{2}\.\d{2}\.\d{4})", line)
+        if not m:
+            i += 1
+            continue
 
-    if current_tr:
-        transactions.append(current_tr)
+        post_date = normalize_date(m.group(1))
 
-    # Финално оформяне
-    final_data = []
-    for tr in transactions:
-        if tr["amt"]: # Вземаме само тези със сума
-            desc_text = " ".join(tr["desc"])
-            # Извличане на име на контрагент (ако съществува)
+        # -----------------------------
+        # 2) Description (may span 1–2 lines)
+        # -----------------------------
+        desc = ""
+
+        # part after "/" on same line
+        parts = line.split("/")
+        if len(parts) > 1:
+            desc = parts[1].strip()
+
+        # next line may be continuation
+        if i + 1 < len(lines):
+            next_line = lines[i + 1]
+            if not re.match(r"\d{2}\.\d{2}\.\d{4}", next_line):
+                desc += " " + next_line.strip()
+                i += 1
+
+        # -----------------------------
+        # 3) Type (ДТ/КТ/DT/CT)
+        # -----------------------------
+        type_match = re.search(r"\b(ДТ|КТ|DT|CT)\b", line)
+        if not type_match and i + 1 < len(lines):
+            type_match = re.search(r"\b(ДТ|КТ|DT|CT)\b", lines[i + 1])
+
+        if not type_match:
+            i += 1
+            continue
+
+        op_type_raw = type_match.group(1)
+        tr_type = "D" if op_type_raw in ("ДТ", "DT") else "C"
+
+        # -----------------------------
+        # 4) Amount (EUR column)
+        # -----------------------------
+        amt_match = re.search(r"(\d[\d\.,]*)$", line)
+        if not amt_match and i + 1 < len(lines):
+            amt_match = re.search(r"(\d[\d\.,]*)$", lines[i + 1])
+
+        if not amt_match:
+            i += 1
+            continue
+
+        amt_raw = amt_match.group(1).replace(",", "").strip()
+        try:
+            amt = f"{float(amt_raw):.2f}"
+        except:
+            i += 1
+            continue
+
+        # -----------------------------
+        # 5) Name + Reason
+        # -----------------------------
+        name, rem = extract_name_and_reason(desc)
+
+        # -----------------------------
+        # 6) ATM logic
+        # -----------------------------
+        if "ATM" in desc or "Основание: ATM" in desc:
             name = "null"
-            rem = desc_text
-            
-            if "Контрагент:" in desc_text:
-                parts = desc_text.split("Контрагент:")
-                name = parts[1].strip()[:50]
-                rem = parts[0].strip()
-            elif "/" in desc_text:
-                parts = desc_text.split("/")
-                if len(parts) > 1: name = parts[1].strip()[:50]
+            rem = "ТЕГЛЕНЕ АТМ"
+            tr_name = "ТЕГЛЕНЕ"
+        else:
+            tr_name = "ОПЕРАЦИЯ"
 
-            final_data.append({
-                "post_date": tr["post_date"],
-                "name": name,
-                "rem1": rem[:100],
-                "tr_name": "ОПЕРАЦИЯ",
-                "amt": tr["amt"],
-                "type": tr["type"]
-            })
+        # -----------------------------
+        # 7) Save transaction
+        # -----------------------------
+        transactions.append({
+            "post_date": post_date,
+            "name": name,
+            "rem1": rem,
+            "tr_name": tr_name,
+            "amt": amt,
+            "type": tr_type,
+        })
 
-    return iban, client_name, final_data
+        i += 1
 
-# Streamlit част за тестване
-st.title("UniCredit EUR/BGN Parser")
-file = st.file_uploader("Качете PDF", type="pdf")
-
-if file:
-    # КРИТИЧНО: Използваме LAParams, за да не спира четенето на средата
-    text = extract_text(BytesIO(file.read()), laparams=LAParams())
-    
-    iban, client, results = parse_unicredit_v3(text)
-    
-    if results:
-        st.write(f"Клиент: {client}")
-        st.write(f"IBAN: {iban}")
-        st.table(results)
-    else:
-        st.warning("Не бяха открити трансакции в извлечения текст.")
-        with st.expander("Виж извлечения текст"):
-            st.text(text)
+    return iban, client_name, transactions
             
 # ---------------------------------------------------------
 # OBB PARSER
