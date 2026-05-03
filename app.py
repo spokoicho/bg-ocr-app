@@ -90,49 +90,27 @@ def parse_unicredit_text(text):
     while i < len(lines):
         line = lines[i]
 
-        # 1) Detect date
-        if not re.match(r"\d{2}\.\d{2}\.\d{4}", line):
+        # Търсим ред, който съдържа дата + тип + сума
+        m = re.search(r"(\d{2}\.\d{2}\.\d{4}).*(ДТ|КТ|DT|CT).*(\d+[\.,]\d{2})", line)
+        if not m:
             i += 1
             continue
 
-        post_date = normalize_date(line)
-        i += 1
+        # Извличаме данните
+        post_date = normalize_date(m.group(1))
+        tr_type = "D" if m.group(2) in ("ДТ", "DT") else "C"
+        amt = m.group(3).replace(",", ".")
 
-        # 2) Skip second date if present
-        if i < len(lines) and re.match(r"\d{2}\.\d{2}\.\d{4}", lines[i]):
-            i += 1
+        # Описание = всичко след датата в този ред
+        desc = line
 
-        # 3) Find type
-        tr_type = None
-        while i < len(lines):
-            if re.search(r"\b(ДТ|КТ|DT|CT)\b", lines[i]):
-                raw = lines[i]
-                tr_type = "D" if ("ДТ" in raw or "DT" in raw) else "C"
-                i += 1
-                break
-            i += 1
+        # Следващите редове са продължение на описанието,
+        # докато не срещнем нова дата
+        j = i + 1
+        while j < len(lines) and not re.match(r"\d{2}\.\d{2}\.\d{4}", lines[j]):
+            desc += " " + lines[j]
+            j += 1
 
-        if tr_type is None:
-            continue
-
-        # 4) Collect description until we hit a numeric EUR amount
-        desc_parts = []
-        amt = None
-
-        while i < len(lines):
-            # EUR amount must be a pure number (your requirement A)
-            if re.match(r"^\d+[\.,]\d{2}$", lines[i]):
-                amt = lines[i].replace(",", ".")
-                i += 1
-                break
-
-            desc_parts.append(lines[i])
-            i += 1
-
-        if amt is None:
-            continue
-
-        desc = " ".join(desc_parts).strip()
         name, rem = extract_name_and_reason(desc)
         tr_name = "ТЕГЛЕНЕ" if "ATM" in desc else "ОПЕРАЦИЯ"
 
@@ -144,6 +122,8 @@ def parse_unicredit_text(text):
             "amt": amt,
             "type": tr_type,
         })
+
+        i = j
 
     return transactions
 
