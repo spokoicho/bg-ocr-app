@@ -101,26 +101,38 @@ def apply_fixes(text):
 # UNICREDIT NAME + REASON EXTRACTION
 # ---------------------------------------------------------
 def extract_name_and_reason(desc):
-    if "ATM" in desc or "Операция с карта" in desc:
+    # Нормализиране на интервали и нови редове
+    clean = re.sub(r"\s+", " ", desc).strip()
+
+    # 1) ATM / карта
+    if re.search(r"\bATM\b", clean, re.IGNORECASE) or "Операция с карта" in clean:
         return "null", "ТЕГЛЕНЕ АТМ"
 
-    if "Контрагент" in desc:
-        left, right = desc.split("Контрагент", 1)
-        name = right.replace(":", "").strip()
-        rem = left.strip()
+    # 2) Контрагент:
+    m = re.search(r"Контрагент\s*:?\s*([A-ZА-Я0-9\s\.\-]+)", clean)
+    if m:
+        name = m.group(1).strip()
+        # Основание след "Основание:"
+        rem_match = re.search(r"Основание\s*:?\s*(.+)$", clean)
+        rem = rem_match.group(1).strip() if rem_match else clean
         return name, rem
 
-    iban_match = re.search(r"BG\d{20}\s*/\s*([A-ZА-Я0-9\s\.-]+)", desc)
-    if iban_match:
-        name = iban_match.group(1).strip()
-        rem = desc.split(name, 1)[1].strip()
+    # 3) IBAN + име след него
+    m = re.search(r"(BG\d{20})\s*/\s*([A-ZА-Я0-9\s\.\-]+)", clean)
+    if m:
+        name = m.group(2).strip()
+        # Основание след "Основание:"
+        rem_match = re.search(r"Основание\s*:?\s*(.+)$", clean)
+        rem = rem_match.group(1).strip() if rem_match else clean
         return name, rem
 
-    if "Основание:" in desc:
-        rem = desc.split("Основание:", 1)[1].strip()
-        return "null", rem
+    # 4) Само основание
+    m = re.search(r"Основание\s*:?\s*(.+)$", clean)
+    if m:
+        return "null", m.group(1).strip()
 
-    return "null", desc
+    # 5) fallback – цялото описание като основание
+    return "null", clean
 
 # ---------------------------------------------------------
 # UNICREDIT PARSER (FINAL)
