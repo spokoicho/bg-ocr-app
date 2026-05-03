@@ -138,57 +138,58 @@ def extract_name_and_reason(desc):
 # UNICREDIT PARSER (FINAL)
 # ---------------------------------------------------------
 def parse_unicredit_statement(text):
+    # Нормализиране на текста
     lines = [l.strip() for l in text.split("\n") if l.strip()]
+    full_text = "\n".join(lines)
 
-    iban_match = re.search(r"IBAN:?(BG\d{20})", text)
+    # IBAN
+    iban_match = re.search(r"IBAN:?\s*(BG\d{20})", full_text)
     iban = iban_match.group(1) if iban_match else "Неизвестен"
 
-    client_match = re.search(r"Получател\s*\|\s*Recipient\s*\n([A-ZА-Яa-zа-я\s]+)", text)
-    client_name = client_match.group(1).strip() if client_match else "Клиент"
+    # Име на клиент – по-гъвкав regex
+    client_match = re.search(
+        r"(Получател|Титуляр)\s*\|?\s*(Recipient|Holder)?.*?\n([A-ZА-Яa-zа-я0-9\s\.\-]+)",
+        full_text
+    )
+    client_name = client_match.group(3).strip() if client_match else "Клиент"
 
-    blocks = []
-    current = []
+    # Сглобяваме обратно текста за regex парсване на транзакции
+    normalized = re.sub(r"\s+", " ", full_text)
 
-    def is_date_line(line):
-        return bool(re.match(r"^\d{2}\.\d{2}\.\d{4}", line))
-
-    for i, line in enumerate(lines):
-        if is_date_line(line):
-            if current and not is_date_line(lines[i - 1]):
-                blocks.append("\n".join(current))
-                current = []
-            current.append(line)
-        else:
-            current.append(line)
-
-    if current:
-        blocks.append("\n".join(current))
+    # Шаблон за транзакция:
+    # дата, ДТ/КТ, сума, EUR, после описание до следващата дата/ДТ/КТ/сума
+    pattern = re.compile(
+        r"(\d{2}\.\d{2}\.\d{4})"          # дата
+        r".{0,20}?"                       # малко шум
+        r"\b(ДТ|КТ)\b"                    # тип
+        r".{0,20}?"                       # малко шум
+        r"([\d\.,]+)\s*EUR"               # сума
+        r"(.*?)(?=\d{2}\.\d{2}\.\d{4}|\Z)",  # описание до следваща дата или край
+        re.DOTALL
+    )
 
     transactions = []
 
-    for block in blocks:
-        m_date = re.search(r"(\d{2}\.\d{2}\.\d{4})", block)
-        if not m_date:
-            continue
+    for m in pattern.finditer(normalized):
+        raw_date = m.group(1)
+        op_type = m.group(2)
+        raw_amt = m.group(3)
+        desc = m.group(4).strip()
 
-        raw_date = m_date.group(1)
         fixed_date = normalize_date(raw_date)
 
-        m_type = re.search(r"\b(ДТ|КТ)\b", block)
-        if not m_type:
+        # Сума – махаме разделители
+        amt = raw_amt.replace(" ", "").replace(",", ".")
+        try:
+            val = float(amt)
+        except:
             continue
 
-        op_type = m_type.group(1)
+        # Тип транзакция
+        tr_type = "D" if op_type == "ДТ" else "C"
 
-        m_amt = re.search(r"([\d\.,]+)\s*EUR", block)
-        if not m_amt:
-            continue
-
-        amt = m_amt.group(1).replace(",", "").strip()
-
-        desc = block
-
-        if "ATM" in desc or "Операция с карта" in desc:
+        # ATM / име / основание
+        if re.search(r"\bATM\b", desc, re.IGNORECASE) or "Операция с карта" in desc:
             name = "null"
             rem = "ТЕГЛЕНЕ АТМ"
             tr_name = "ТЕГЛЕНЕ"
@@ -201,8 +202,8 @@ def parse_unicredit_statement(text):
             "name": name,
             "rem1": rem,
             "tr_name": tr_name,
-            "amt": amt,
-            "type": "D" if op_type == "ДТ" else "C",
+            "amt": f"{abs(val):.2f}",
+            "type": tr_type,
         }
 
         transactions.append(tr)
