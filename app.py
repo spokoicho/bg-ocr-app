@@ -239,14 +239,15 @@ if file:
     with st.spinner("Обработка..."):
         pdf_bytes = file.read()
 
-        # Extract OCR text (only for OBB)
+        # OCR text (only for OBB)
         ocr_text = ocr_pdf(pdf_bytes)
         ocr_text = apply_fixes(ocr_text)
         st.text(ocr_text[:2000])
         
-        # Detect bank using PDF text (not OCR)
+        # PDF text (for UniCredit detection)
         pdf_text = extract_text(BytesIO(pdf_bytes))
         
+        # Detect bank using REAL PDF text
         if "UniCredit" in pdf_text or "УниКредит" in pdf_text:
             bank = "UniCredit"
             transactions = parse_unicredit_text(pdf_bytes)
