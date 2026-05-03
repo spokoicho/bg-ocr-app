@@ -247,7 +247,7 @@ if file:
         # Detect bank
         if "UniCredit" in text or "УниКредит" in text:
             bank = "UniCredit"
-            transactions = parse_unicredit_text(text)
+            transactions = parse_unicredit_text(pdf_bytes)
             iban_match = re.search(r"IBAN:?(BG\d{20})", text)
             iban = iban_match.group(1) if iban_match else "Неизвестен"
             client_name = "Клиент"
