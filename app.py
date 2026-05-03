@@ -138,75 +138,95 @@ def extract_name_and_reason(desc):
 # UNICREDIT PARSER (FINAL)
 # ---------------------------------------------------------
 def parse_unicredit_statement(text):
-    # Нормализиране на текста
     lines = [l.strip() for l in text.split("\n") if l.strip()]
-    full_text = "\n".join(lines)
 
     # IBAN
-    iban_match = re.search(r"IBAN:?\s*(BG\d{20})", full_text)
+    iban_match = re.search(r"IBAN:?\s*(BG\d{20})", text)
     iban = iban_match.group(1) if iban_match else "Неизвестен"
 
-    # Име на клиент – по-гъвкав regex
-    client_match = re.search(
-        r"(Получател|Титуляр)\s*\|?\s*(Recipient|Holder)?.*?\n([A-ZА-Яa-zа-я0-9\s\.\-]+)",
-        full_text
-    )
-    client_name = client_match.group(3).strip() if client_match else "Клиент"
-
-    # Сглобяваме обратно текста за regex парсване на транзакции
-    normalized = re.sub(r"\s+", " ", full_text)
-
-    # Шаблон за транзакция:
-    # дата, ДТ/КТ, сума, EUR, после описание до следващата дата/ДТ/КТ/сума
-    pattern = re.compile(
-        r"(\d{2}\.\d{2}\.\d{4})"          # дата
-        r".{0,20}?"                       # малко шум
-        r"\b(ДТ|КТ)\b"                    # тип
-        r".{0,20}?"                       # малко шум
-        r"([\d\.,]+)\s*EUR"               # сума
-        r"(.*?)(?=\d{2}\.\d{2}\.\d{4}|\Z)",  # описание до следваща дата или край
-        re.DOTALL
-    )
+    # Клиент
+    client_match = re.search(r"Получател\s*\|\s*Recipient\s*\n([A-ZА-Яa-zа-я\s]+)", text)
+    client_name = client_match.group(1).strip() if client_match else "Клиент"
 
     transactions = []
 
-    for m in pattern.finditer(normalized):
-        raw_date = m.group(1)
-        op_type = m.group(2)
-        raw_amt = m.group(3)
-        desc = m.group(4).strip()
+    i = 0
+    while i < len(lines):
+        line = lines[i]
 
-        fixed_date = normalize_date(raw_date)
-
-        # Сума – махаме разделители
-        amt = raw_amt.replace(" ", "").replace(",", ".")
-        try:
-            val = float(amt)
-        except:
+        # 1) Търсим ред, който започва с дата
+        m = re.match(r"(\d{2}\.\d{2}\.\d{4})", line)
+        if not m:
+            i += 1
             continue
 
-        # Тип транзакция
-        tr_type = "D" if op_type == "ДТ" else "C"
+        post_date = normalize_date(m.group(1))
 
-        # ATM / име / основание
-        if re.search(r"\bATM\b", desc, re.IGNORECASE) or "Операция с карта" in desc:
+        # 2) Описание (може да е на 1 или 2 реда)
+        desc = ""
+        # описание е в същия ред след "/"
+        parts = line.split("/")
+        if len(parts) > 1:
+            desc = parts[1].strip()
+
+        # следващият ред може да е продължение
+        if i + 1 < len(lines):
+            next_line = lines[i + 1]
+            # ако няма нова дата → това е продължение на описанието
+            if not re.match(r"\d{2}\.\d{2}\.\d{4}", next_line):
+                desc += " " + next_line.strip()
+                i += 1
+
+        # 3) Тип (ДТ/КТ/DT/CT)
+        type_match = re.search(r"\b(ДТ|КТ|DT|CT)\b", line)
+        if not type_match:
+            # пробваме в следващия ред
+            if i + 1 < len(lines):
+                type_match = re.search(r"\b(ДТ|КТ|DT|CT)\b", lines[i + 1])
+        if not type_match:
+            i += 1
+            continue
+
+        op_type_raw = type_match.group(1)
+        tr_type = "D" if op_type_raw in ("ДТ", "DT") else "C"
+
+        # 4) Сума (EUR колоната)
+        amt_match = re.search(r"(\d[\d\.,]*)$", line)
+        if not amt_match and i + 1 < len(lines):
+            amt_match = re.search(r"(\d[\d\.,]*)$", lines[i + 1])
+
+        if not amt_match:
+            i += 1
+            continue
+
+        amt_raw = amt_match.group(1).replace(",", "").strip()
+        try:
+            amt = f"{float(amt_raw):.2f}"
+        except:
+            i += 1
+            continue
+
+        # 5) Име и основание
+        name, rem = extract_name_and_reason(desc)
+
+        # 6) ATM логика
+        if "ATM" in desc or "Основание: ATM" in desc:
             name = "null"
             rem = "ТЕГЛЕНЕ АТМ"
             tr_name = "ТЕГЛЕНЕ"
         else:
-            name, rem = extract_name_and_reason(desc)
             tr_name = "ОПЕРАЦИЯ"
 
-        tr = {
-            "post_date": fixed_date,
+        transactions.append({
+            "post_date": post_date,
             "name": name,
             "rem1": rem,
             "tr_name": tr_name,
-            "amt": f"{abs(val):.2f}",
+            "amt": amt,
             "type": tr_type,
-        }
+        })
 
-        transactions.append(tr)
+        i += 1
 
     return iban, client_name, transactions
 
