@@ -88,7 +88,7 @@ def ocr_pdf(pdf_bytes):
 def get_pdf_text(pdf_bytes):
     # 1) Direct extraction
     try:
-        text = extract_text(BytesIO(pdf_bytes))
+        text = extract_pdf_tables(pdf_bytes)
         if text and len(text.strip()) > 200:
             return text
     except:
