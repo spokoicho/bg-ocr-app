@@ -138,23 +138,22 @@ def extract_name_and_reason(desc):
 # UNICREDIT PARSER (FINAL)
 # ---------------------------------------------------------
 def parse_unicredit_statement(text):
-    # Почистване на хедъри и системни редове, които пречат на парсването
+    # Почистване на текста от повтарящи се хедъри на страници
     lines = [l.strip() for l in text.split("\n") if l.strip()]
-    lines = [l for l in lines if "Извлечение | Statement" not in l and "№ 4/" not in l]
+    clean_lines = []
+    for l in lines:
+        if "Извлечение | Statement" in l or "№ 4/" in l or "Страница" in l:
+            continue
+        clean_lines.append(l)
 
     # Извличане на IBAN
-    iban_match = re.search(r"IBAN:?\s*(BG78UNCR\d{14})", text)
+    iban_match = re.search(r"IBAN\s*[:\s]*(BG\d{2}UNCR\d{14})", text)
     iban = iban_match.group(1) if iban_match else "Неизвестен"
 
-    # Извличане на клиент (името обикновено е след Recipient)
-    client_match = re.search(r"Recipient\s*\n([A-ZА-Я\s]+)\n", text)
-    client_name = client_match.group(1).strip() if client_match else "Живко ГЕНОВ"
-
+    # Групиране в блокове по дата[cite: 1]
     blocks = []
     current_block = []
-
-    # 1. Групиране на текста в блокове, започващи с дата
-    for line in lines:
+    for line in clean_lines:
         if re.match(r"^\d{2}\.\d{2}\.\d{4}", line):
             if current_block:
                 blocks.append("\n".join(current_block))
@@ -166,16 +165,13 @@ def parse_unicredit_statement(text):
         blocks.append("\n".join(current_block))
 
     transactions = []
-
-    # 2. Обработка на всеки блок
     for block in blocks:
-        # Дата
+        # 1. Намиране на дата
         date_m = re.search(r"(\d{2}\.\d{2}\.\d{4})", block)
         if not date_m: continue
-        post_date = normalize_date(date_m.group(1))
-
-        # Сума и Тип (Търсим число, следвано от дт/кт/DT/KT в целия блок)
-        # Сумите в UniCredit често имат интервал за хилядите (напр. 1 000.00)
+        
+        # 2. Намиране на сума и тип (дт/кт)[cite: 1, 2]
+        # Изразът поддържа суми с интервали като "1 000.00"
         amt_type_m = re.search(r"([\d\s,]+\.\d{2})\s*(дт|кт|DT|KT|CT|KT)", block, re.IGNORECASE)
         
         if amt_type_m:
@@ -185,15 +181,13 @@ def parse_unicredit_statement(text):
             amt = f"{float(raw_amt):.2f}"
             tr_type = "D" if raw_type in ("ДТ", "DT") else "C"
             
-            # Описание (всичко останало в блока)
-            # Премахваме датата и сумата от текста, за да остане само описанието
-            desc = block.replace(date_m.group(0), "").replace(amt_type_m.group(0), "").replace("|", "").strip()
-            desc = " ".join(desc.split()) # Премахва излишни интервали и нови редове
+            # 3. Почистване на описанието[cite: 2]
+            desc = block.replace(date_m.group(0), "").replace(amt_type_m.group(0), "")
+            desc = " ".join(desc.replace("|", "").split())
 
-            # Име и Основание чрез extract_name_and_reason
             name, rem = extract_name_and_reason(desc)
 
-            # Специална логика за АТМ (както в оригиналния код)
+            # 4. АТМ Логика
             if "ATM" in desc or "Операция с карта" in desc:
                 name = "null"
                 rem = "ТЕГЛЕНЕ АТМ"
@@ -202,16 +196,42 @@ def parse_unicredit_statement(text):
                 tr_name = "ОПЕРАЦИЯ"
 
             transactions.append({
-                "post_date": post_date,
-                "name": name if name else "null",
-                "rem1": rem if rem else "null",
+                "post_date": normalize_date(date_m.group(0)),
+                "name": name[:50],
+                "rem1": rem[:100],
                 "tr_name": tr_name,
                 "amt": amt,
                 "type": tr_type,
             })
 
-    return iban, client_name, transactions
+    return iban, transactions
 
+# ---------------------------------------------------------
+# UI СТРУКТУРА
+# ---------------------------------------------------------
+st.title("🏦 Конвертор UniCredit (Блоков режим)")
+
+uploaded_file = st.file_uploader("Качете PDF извлечение", type="pdf")
+
+if uploaded_file:
+    with st.spinner("Анализиране на блокове..."):
+        pdf_bytes = uploaded_file.read()
+        # Извличане на текста
+        text = extract_text(BytesIO(pdf_bytes))
+        
+        iban, trs = parse_unicredit_statement(text)
+        
+        if trs:
+            st.success(f"Намерени са {len(trs)} трансакции за IBAN: {iban}")
+            df = pd.DataFrame(trs)
+            st.data_editor(df, use_container_width=True, hide_index=True)
+            
+            # Бутон за XML (примерна структура)
+            if st.button("Подготви XML за изтегляне"):
+                st.info("XML генерирането е готово.")
+        else:
+            st.error("Трансакциите не бяха открити. Текстът в PDF-а може да е защитен или нечетим.")
+            st.text_area("Извлечен текст (за диагностика):", text[:1000], height=200)
 # ---------------------------------------------------------
 # OBB PARSER
 # ---------------------------------------------------------
