@@ -3,7 +3,6 @@ pytesseract
 pdf2image
 PyPDF2
 pdfminer.six
-pdfplumber
 opencv-python-headless
 numpy
 pandas
