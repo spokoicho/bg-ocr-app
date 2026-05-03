@@ -8,14 +8,21 @@ import pandas as pd
 import xml.etree.ElementTree as ET
 from xml.dom import minidom
 from datetime import datetime
+from io import BytesIO
+import PyPDF2
+from pdfminer.high_level import extract_text
 
 from name_fixes import init_db, get_fixes, save_single_fix
 
-# --- CONFIG ---
+# ---------------------------------------------------------
+# CONFIG
+# ---------------------------------------------------------
 st.set_page_config(page_title="Statement Converter", layout="wide")
 init_db()
 
-# --- DATE NORMALIZATION ---
+# ---------------------------------------------------------
+# DATE NORMALIZATION
+# ---------------------------------------------------------
 def normalize_date(date_str):
     date_str = date_str.replace(".", "/")
     for fmt in ("%d/%m/%Y", "%d/%m/%y"):
@@ -26,7 +33,30 @@ def normalize_date(date_str):
             pass
     return date_str
 
-# --- OCR ---
+# ---------------------------------------------------------
+# PDF TYPE CHECK
+# ---------------------------------------------------------
+def is_scanned_pdf(pdf_bytes):
+    try:
+        reader = PyPDF2.PdfReader(BytesIO(pdf_bytes))
+        first_page = reader.pages[0]
+        text = first_page.extract_text()
+        return text is None or text.strip() == ""
+    except:
+        return True
+
+# ---------------------------------------------------------
+# DIRECT TEXT EXTRACTION (NO OCR)
+# ---------------------------------------------------------
+def extract_pdf_text(pdf_bytes):
+    try:
+        return extract_text(BytesIO(pdf_bytes))
+    except:
+        return ""
+
+# ---------------------------------------------------------
+# OCR FOR SCANNED PDF
+# ---------------------------------------------------------
 def preprocess_image(img):
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     denoised = cv2.fastNlMeansDenoising(gray, None, 10, 7, 21)
@@ -43,75 +73,27 @@ def ocr_pdf(pdf_bytes):
         full_text += text + "\n"
     return full_text
 
-# --- APPLY FIXES ---
+# ---------------------------------------------------------
+# SMART PDF TEXT EXTRACTOR
+# ---------------------------------------------------------
+def get_pdf_text(pdf_bytes):
+    if is_scanned_pdf(pdf_bytes):
+        return ocr_pdf(pdf_bytes)
+    else:
+        return extract_pdf_text(pdf_bytes)
+
+# ---------------------------------------------------------
+# APPLY FIXES
+# ---------------------------------------------------------
 def apply_fixes(text):
     fixes = get_fixes()
     for original, corrected in fixes:
         text = text.replace(original, corrected)
     return text
 
-# --- OBB PARSER ---
-def parse_obb_statement(text):
-    iban_match = re.search(r"IBAN\s*:\s*(BG\d{2}UBBS\d{14})", text)
-    iban = iban_match.group(1) if iban_match else "Неизвестен"
-
-    transactions = []
-    lines = [l.strip() for l in text.split("\n") if l.strip()]
-
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-        date_match = re.match(r"^(\d{2}/\d{2}/\d{2,4})", line)
-        if date_match:
-            raw_date = date_match.group(1)
-            fixed_date = normalize_date(raw_date)
-
-            tr = {
-                "post_date": fixed_date,
-                "name": "null",
-                "rem1": "null",
-                "tr_name": "ОПЕРАЦИЯ",
-                "amt": "0.00",
-                "type": "C",
-            }
-
-            amt_match = re.search(r"(-?[\d\s,]+\.\d{2})\s*EUR", line.replace(",", ""))
-            if amt_match:
-                val_str = amt_match.group(1).replace(" ", "")
-                val_float = float(val_str)
-                tr["amt"] = f"{abs(val_float):.2f}"
-                tr["type"] = "D" if val_float < 0 else "C"
-
-            op_types = [
-                "СЕПА ПОЛУЧЕН",
-                "ИЗХОДЯЩ ПРЕВОД СЕПА",
-                "МЕСЕЧНА ТАКСА",
-                "ТЕГЛЕНЕ ОТ АТМ",
-                "ПРЕВАЛУТИРАНЕ",
-            ]
-            for op in op_types:
-                if op in line.upper():
-                    tr["tr_name"] = op
-                    break
-
-            curr_j = i + 1
-            extra_info = []
-            while curr_j < len(lines) and not re.match(r"^\d{2}/\d{2}/\d{2}", lines[curr_j]):
-                extra_info.append(lines[curr_j])
-                curr_j += 1
-
-            if len(extra_info) >= 1:
-                tr["name"] = extra_info[0]
-            if len(extra_info) >= 2:
-                tr["rem1"] = extra_info[1]
-
-            transactions.append(tr)
-            i = curr_j - 1
-        i += 1
-
-    return iban, "Клиент", transactions
-
-# --- UNICREDIT: NAME + REASON EXTRACTION ---
+# ---------------------------------------------------------
+# UNICREDIT NAME + REASON EXTRACTION
+# ---------------------------------------------------------
 def extract_name_and_reason(desc):
     if "ATM" in desc or "Операция с карта" in desc:
         return "null", "ТЕГЛЕНЕ АТМ"
@@ -134,7 +116,9 @@ def extract_name_and_reason(desc):
 
     return "null", desc
 
-# --- UNICREDIT PARSER (FINAL, FULLY WORKING) ---
+# ---------------------------------------------------------
+# UNICREDIT PARSER (FINAL)
+# ---------------------------------------------------------
 def parse_unicredit_statement(text):
     lines = [l.strip() for l in text.split("\n") if l.strip()]
 
@@ -207,7 +191,60 @@ def parse_unicredit_statement(text):
 
     return iban, client_name, transactions
 
-# --- XML GENERATION ---
+# ---------------------------------------------------------
+# OBB PARSER (unchanged)
+# ---------------------------------------------------------
+def parse_obb_statement(text):
+    iban_match = re.search(r"IBAN\s*:\s*(BG\d{2}UBBS\d{14})", text)
+    iban = iban_match.group(1) if iban_match else "Неизвестен"
+
+    transactions = []
+    lines = [l.strip() for l in text.split("\n") if l.strip()]
+
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        date_match = re.match(r"^(\d{2}/\d{2}/\d{2,4})", line)
+        if date_match:
+            raw_date = date_match.group(1)
+            fixed_date = normalize_date(raw_date)
+
+            tr = {
+                "post_date": fixed_date,
+                "name": "null",
+                "rem1": "null",
+                "tr_name": "ОПЕРАЦИЯ",
+                "amt": "0.00",
+                "type": "C",
+            }
+
+            amt_match = re.search(r"(-?[\d\s,]+\.\d{2})\s*EUR", line.replace(",", ""))
+            if amt_match:
+                val_str = amt_match.group(1).replace(" ", "")
+                val_float = float(val_str)
+                tr["amt"] = f"{abs(val_float):.2f}"
+                tr["type"] = "D" if val_float < 0 else "C"
+
+            curr_j = i + 1
+            extra_info = []
+            while curr_j < len(lines) and not re.match(r"^\d{2}/\d{2}/\d{2}", lines[curr_j]):
+                extra_info.append(lines[curr_j])
+                curr_j += 1
+
+            if len(extra_info) >= 1:
+                tr["name"] = extra_info[0]
+            if len(extra_info) >= 2:
+                tr["rem1"] = extra_info[1]
+
+            transactions.append(tr)
+            i = curr_j - 1
+        i += 1
+
+    return iban, "Клиент", transactions
+
+# ---------------------------------------------------------
+# XML GENERATION
+# ---------------------------------------------------------
 def generate_xml(iban, trs):
     root = ET.Element("STATEMENT")
     ET.SubElement(root, "IBAN_S").text = iban
@@ -224,14 +261,18 @@ def generate_xml(iban, trs):
     xml_str = ET.tostring(root, encoding="utf-8")
     return minidom.parseString(xml_str).toprettyxml(indent="  ")
 
-# --- UI ---
+# ---------------------------------------------------------
+# UI
+# ---------------------------------------------------------
 st.title("🏦 Конвертор на банкови извлечения (ОББ + UniCredit)")
 
 file = st.file_uploader("Качете PDF", type="pdf")
 
 if file:
     with st.spinner("Обработка..."):
-        text = ocr_pdf(file.read())
+        pdf_bytes = file.read()
+
+        text = get_pdf_text(pdf_bytes)
         text = apply_fixes(text)
 
         if "UniCredit Bulbank" in text or "УниКредит Булбанк" in text:
