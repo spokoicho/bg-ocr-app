@@ -1,10 +1,15 @@
 import streamlit as st
+import pytesseract
+from pdf2image import convert_from_bytes
+import cv2
+import numpy as np
 import re
 import pandas as pd
 import xml.etree.ElementTree as ET
 from xml.dom import minidom
 from datetime import datetime
 from io import BytesIO
+import PyPDF2
 from pdfminer.high_level import extract_text
 
 from name_fixes import init_db, get_fixes, save_single_fix
@@ -29,14 +34,59 @@ def normalize_date(date_str):
     return date_str
 
 # ---------------------------------------------------------
-# PDF TEXT EXTRACTION (ONLY PDFMINER)
+# PDF TYPE CHECK
 # ---------------------------------------------------------
-def get_pdf_text(pdf_bytes):
+def is_scanned_pdf(pdf_bytes):
     try:
-        text = extract_text(BytesIO(pdf_bytes))
-        return text
+        reader = PyPDF2.PdfReader(BytesIO(pdf_bytes))
+        first_page = reader.pages[0]
+        text = first_page.extract_text()
+        return text is None or text.strip() == ""
+    except:
+        return True
+
+# ---------------------------------------------------------
+# DIRECT TEXT EXTRACTION (NO OCR)
+# ---------------------------------------------------------
+def extract_pdf_text(pdf_bytes):
+    try:
+        return extract_text(BytesIO(pdf_bytes))
     except:
         return ""
+
+# ---------------------------------------------------------
+# OCR FOR SCANNED PDF
+# ---------------------------------------------------------
+def preprocess_image(img):
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    denoised = cv2.fastNlMeansDenoising(gray, None, 10, 7, 21)
+    _, thresh = cv2.threshold(denoised, 180, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    return thresh
+
+def ocr_pdf(pdf_bytes):
+    pages = convert_from_bytes(pdf_bytes, dpi=400)
+    full_text = ""
+    for page in pages:
+        img = np.array(page)
+        processed = preprocess_image(img)
+        text = pytesseract.image_to_string(processed, lang="bul+eng", config="--oem 3 --psm 6")
+        full_text += text + "\n"
+    return full_text
+
+# ---------------------------------------------------------
+# HYBRID PDF TEXT EXTRACTOR
+# ---------------------------------------------------------
+def get_pdf_text(pdf_bytes):
+    # 1) Direct extraction
+    try:
+        text = extract_text(BytesIO(pdf_bytes))
+        if text and len(text.strip()) > 200:
+            return text
+    except:
+        pass
+
+    # 2) OCR fallback
+    return ocr_pdf(pdf_bytes)
 
 # ---------------------------------------------------------
 # APPLY FIXES
@@ -73,7 +123,7 @@ def extract_name_and_reason(desc):
     return "null", desc
 
 # ---------------------------------------------------------
-# UNICREDIT PARSER
+# UNICREDIT PARSER (FINAL)
 # ---------------------------------------------------------
 def parse_unicredit_statement(text):
     lines = [l.strip() for l in text.split("\n") if l.strip()]
