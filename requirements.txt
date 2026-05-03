@@ -5,3 +5,5 @@ opencv-python-headless
 numpy
 st-gsheets-connection
 pandas
+PyPDF2==3.0.1
+pdfminer.six==20221105
