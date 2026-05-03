@@ -74,13 +74,19 @@ def ocr_pdf(pdf_bytes):
     return full_text
 
 # ---------------------------------------------------------
-# SMART PDF TEXT EXTRACTOR
+# HYBRID PDF TEXT EXTRACTOR
 # ---------------------------------------------------------
 def get_pdf_text(pdf_bytes):
-    if is_scanned_pdf(pdf_bytes):
-        return ocr_pdf(pdf_bytes)
-    else:
-        return extract_pdf_text(pdf_bytes)
+    # 1) Direct extraction
+    try:
+        text = extract_text(BytesIO(pdf_bytes))
+        if text and len(text.strip()) > 200:
+            return text
+    except:
+        pass
+
+    # 2) OCR fallback
+    return ocr_pdf(pdf_bytes)
 
 # ---------------------------------------------------------
 # APPLY FIXES
@@ -192,7 +198,7 @@ def parse_unicredit_statement(text):
     return iban, client_name, transactions
 
 # ---------------------------------------------------------
-# OBB PARSER (unchanged)
+# OBB PARSER
 # ---------------------------------------------------------
 def parse_obb_statement(text):
     iban_match = re.search(r"IBAN\s*:\s*(BG\d{2}UBBS\d{14})", text)
