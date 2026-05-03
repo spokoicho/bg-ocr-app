@@ -231,6 +231,7 @@ if file:
         # Extract text
         text = ocr_pdf(pdf_bytes)
         text = apply_fixes(text)
+        st.text(text[:2000])
 
         # Detect bank
         if "UniCredit" in text or "УниКредит" in text:
