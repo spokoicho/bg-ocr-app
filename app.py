@@ -10,25 +10,7 @@ from xml.dom import minidom
 from datetime import datetime
 from io import BytesIO
 import PyPDF2
-from pdfminer.high_level import extract_pages
-from pdfminer.layout import LTTextContainer
-
-def extract_pdf_tables(pdf_bytes):
-    text = ""
-    for page_layout in extract_pages(BytesIO(pdf_bytes)):
-        for element in page_layout:
-            if isinstance(element, LTTextContainer):
-                text += element.get_text()
-    return text
-from pdfminer.layout import LTTextContainer, LTChar, LTAnno, LTTextLine, LTTextBox, LTTextGroup
-
-def extract_pdf_tables(pdf_bytes):
-    text = ""
-    for page_layout in extract_pages(BytesIO(pdf_bytes)):
-        for element in page_layout:
-            if isinstance(element, LTTextContainer):
-                text += element.get_text()
-    return text
+import pdfplumber
 
 from name_fixes import init_db, get_fixes, save_single_fix
 
@@ -52,27 +34,6 @@ def normalize_date(date_str):
     return date_str
 
 # ---------------------------------------------------------
-# PDF TYPE CHECK
-# ---------------------------------------------------------
-def is_scanned_pdf(pdf_bytes):
-    try:
-        reader = PyPDF2.PdfReader(BytesIO(pdf_bytes))
-        first_page = reader.pages[0]
-        text = first_page.extract_text()
-        return text is None or text.strip() == ""
-    except:
-        return True
-
-# ---------------------------------------------------------
-# DIRECT TEXT EXTRACTION (NO OCR)
-# ---------------------------------------------------------
-def extract_pdf_text(pdf_bytes):
-    try:
-        return extract_text(BytesIO(pdf_bytes))
-    except:
-        return ""
-
-# ---------------------------------------------------------
 # OCR FOR SCANNED PDF
 # ---------------------------------------------------------
 def preprocess_image(img):
@@ -92,21 +53,6 @@ def ocr_pdf(pdf_bytes):
     return full_text
 
 # ---------------------------------------------------------
-# HYBRID PDF TEXT EXTRACTOR
-# ---------------------------------------------------------
-def get_pdf_text(pdf_bytes):
-    # 1) Direct extraction
-    try:
-        text = extract_pdf_tables(pdf_bytes)
-        if text and len(text.strip()) > 200:
-            return text
-    except:
-        pass
-
-    # 2) OCR fallback
-    return ocr_pdf(pdf_bytes)
-
-# ---------------------------------------------------------
 # APPLY FIXES
 # ---------------------------------------------------------
 def apply_fixes(text):
@@ -116,106 +62,80 @@ def apply_fixes(text):
     return text
 
 # ---------------------------------------------------------
+# UNICREDIT TABLE EXTRACTOR (pdfplumber)
+# ---------------------------------------------------------
+def extract_unicredit_table(pdf_bytes):
+    rows = []
+    with pdfplumber.open(BytesIO(pdf_bytes)) as pdf:
+        for page in pdf.pages:
+            tables = page.extract_tables()
+            for table in tables:
+                for row in table:
+                    rows.append(row)
+    return rows
+
+# ---------------------------------------------------------
 # UNICREDIT NAME + REASON EXTRACTION
 # ---------------------------------------------------------
 def extract_name_and_reason(desc):
-    # Нормализиране на интервали и нови редове
     clean = re.sub(r"\s+", " ", desc).strip()
 
-    # 1) ATM / карта
-    if re.search(r"\bATM\b", clean, re.IGNORECASE) or "Операция с карта" in clean:
+    if "ATM" in clean:
         return "null", "ТЕГЛЕНЕ АТМ"
 
-    # 2) Контрагент:
     m = re.search(r"Контрагент\s*:?\s*([A-ZА-Я0-9\s\.\-]+)", clean)
     if m:
         name = m.group(1).strip()
-        # Основание след "Основание:"
-        rem_match = re.search(r"Основание\s*:?\s*(.+)$", clean)
-        rem = rem_match.group(1).strip() if rem_match else clean
+        rem = clean
         return name, rem
 
-    # 3) IBAN + име след него
-    m = re.search(r"(BG\d{20})\s*/\s*([A-ZА-Я0-9\s\.\-]+)", clean)
-    if m:
-        name = m.group(2).strip()
-        # Основание след "Основание:"
-        rem_match = re.search(r"Основание\s*:?\s*(.+)$", clean)
-        rem = rem_match.group(1).strip() if rem_match else clean
-        return name, rem
-
-    # 4) Само основание
     m = re.search(r"Основание\s*:?\s*(.+)$", clean)
     if m:
         return "null", m.group(1).strip()
 
-    # 5) fallback – цялото описание като основание
     return "null", clean
 
 # ---------------------------------------------------------
-# UNICREDIT PARSER (FINAL)
+# UNICREDIT PARSER (TABLE-BASED)
 # ---------------------------------------------------------
-def parse_unicredit_statement(text):
-    # 1) Извличаме всички редове <tr>...</tr>
-    rows = re.findall(r"<tr>(.*?)</tr>", text, flags=re.DOTALL)
-
+def parse_unicredit_rows(rows):
     transactions = []
-    last_tr = None
+    last = None
 
-    for row in rows:
-        # 2) Извличаме клетките <td>...</td>
-        cells = re.findall(r"<td.*?>(.*?)</td>", row, flags=re.DOTALL)
-        cells = [re.sub(r"\s+", " ", c).strip() for c in cells]
-
-        if len(cells) < 3:
+    for r in rows:
+        if len(r) < 3:
             continue
 
-        # 3) Проверка дали първата клетка е дата
-        m = re.match(r"(\d{2}\.\d{2}\.\d{4})", cells[0])
-        if m:
-            # Нова транзакция
-            post_date = normalize_date(m.group(1))
-            desc = cells[1]
-            tr_type_raw = cells[2]
-            eur = cells[3] if len(cells) > 3 else ""
-            tr_type = "D" if "ДТ" in tr_type_raw or "DT" in tr_type_raw else "C"
+        date = r[0]
+        desc = r[1]
+        tr_type_raw = r[2]
+        eur = r[3] if len(r) > 3 else ""
 
-            # Ако сумата е празна → ще се попълни от следващия ред
-            amt = eur.replace(",", "").strip()
-            if amt == "":
-                amt = None
+        # New transaction row
+        if date and re.match(r"\d{2}\.\d{2}\.\d{4}", date):
+            amt = eur.replace(",", "").strip() if eur else None
+            tr_type = "D" if ("ДТ" in tr_type_raw or "DT" in tr_type_raw) else "C"
 
-            last_tr = {
-                "post_date": post_date,
+            last = {
+                "post_date": normalize_date(date),
                 "desc": desc,
                 "type": tr_type,
-                "amt": amt,
+                "amt": amt
             }
-            transactions.append(last_tr)
+            transactions.append(last)
 
+        # Continuation row
         else:
-            # Продължение на описанието
-            if last_tr:
-                last_tr["desc"] += " " + cells[1]
+            if last:
+                last["desc"] += " " + desc
+                if last["amt"] is None and eur:
+                    last["amt"] = eur.replace(",", "").strip()
 
-                # Ако сумата е на втория ред
-                if last_tr["amt"] is None and len(cells) > 3:
-                    eur = cells[3].replace(",", "").strip()
-                    if eur:
-                        last_tr["amt"] = eur
-
-    # 4) Преобразуваме описанието в name + rem
+    # Convert to final format
     final = []
     for tr in transactions:
-        desc = tr["desc"]
-
-        if "ATM" in desc:
-            name = "null"
-            rem = "ТЕГЛЕНЕ АТМ"
-            tr_name = "ТЕГЛЕНЕ"
-        else:
-            name, rem = extract_name_and_reason(desc)
-            tr_name = "ОПЕРАЦИЯ"
+        name, rem = extract_name_and_reason(tr["desc"])
+        tr_name = "ТЕГЛЕНЕ" if "ATM" in tr["desc"] else "ОПЕРАЦИЯ"
 
         final.append({
             "post_date": tr["post_date"],
@@ -226,17 +146,10 @@ def parse_unicredit_statement(text):
             "type": tr["type"],
         })
 
-    # 5) IBAN + клиент
-    iban_match = re.search(r"IBAN:?(BG\d{20})", text)
-    iban = iban_match.group(1) if iban_match else "Неизвестен"
+    return final
 
-    client_match = re.search(r"Получател\s*\|\s*Recipient\s*\n([A-ZА-Яa-zа-я\s]+)", text)
-    client_name = client_match.group(1).strip() if client_match else "Клиент"
-
-    return iban, client_name, final
-            
 # ---------------------------------------------------------
-# OBB PARSER
+# OBB PARSER (unchanged)
 # ---------------------------------------------------------
 def parse_obb_statement(text):
     iban_match = re.search(r"IBAN\s*:\s*(BG\d{2}UBBS\d{14})", text)
@@ -316,15 +229,19 @@ if file:
     with st.spinner("Обработка..."):
         pdf_bytes = file.read()
 
-        text = get_pdf_text(pdf_bytes)
-        text = apply_fixes(text)
+        # Try UniCredit table extraction
+        rows = extract_unicredit_table(pdf_bytes)
 
-        st.text(text[:2000])   # ← ТУК
-
-        if "UniCredit Bulbank" in text or "УниКредит Булбанк" in text:
+        if len(rows) > 0:
             bank = "UniCredit"
-            iban, client_name, transactions = parse_unicredit_statement(text)
+            transactions = parse_unicredit_rows(rows)
+            iban_match = re.search(r"IBAN:?(BG\d{20})", str(rows))
+            iban = iban_match.group(1) if iban_match else "Неизвестен"
+            client_name = "Клиент"
         else:
+            # fallback to OBB
+            text = ocr_pdf(pdf_bytes)
+            text = apply_fixes(text)
             bank = "OBB"
             iban, client_name, transactions = parse_obb_statement(text)
 
