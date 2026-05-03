@@ -239,21 +239,23 @@ if file:
     with st.spinner("Обработка..."):
         pdf_bytes = file.read()
 
-        # Extract text
-        text = ocr_pdf(pdf_bytes)
-        text = apply_fixes(text)
-        st.text(text[:2000])
-
-        # Detect bank
-        if "UniCredit" in text or "УниКредит" in text:
+        # Extract OCR text (only for OBB)
+        ocr_text = ocr_pdf(pdf_bytes)
+        ocr_text = apply_fixes(ocr_text)
+        st.text(ocr_text[:2000])
+        
+        # Detect bank using PDF text (not OCR)
+        pdf_text = extract_text(BytesIO(pdf_bytes))
+        
+        if "UniCredit" in pdf_text or "УниКредит" in pdf_text:
             bank = "UniCredit"
             transactions = parse_unicredit_text(pdf_bytes)
-            iban_match = re.search(r"IBAN:?(BG\d{20})", text)
+            iban_match = re.search(r"IBAN:?(BG\d{20})", pdf_text)
             iban = iban_match.group(1) if iban_match else "Неизвестен"
             client_name = "Клиент"
         else:
             bank = "OBB"
-            iban, client_name, transactions = parse_obb_statement(text)
+            iban, client_name, transactions = parse_obb_statement(ocr_text)
 
         if transactions:
             df = pd.DataFrame(transactions)
