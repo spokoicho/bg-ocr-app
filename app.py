@@ -90,28 +90,35 @@ def parse_unicredit_text(text):
     while i < len(lines):
         line = lines[i]
 
-        # Търсим ред, който съдържа дата + тип + сума
-        m = re.search(r"(\d{2}\.\d{2}\.\d{4}).*(ДТ|КТ|DT|CT).*(\d+[\.,]\d{2})", line)
+        # 1) Търсим ред с дата + тип
+        m = re.search(r"(\d{2}\.\d{2}\.\d{4}).*(ДТ|КТ|DT|CT)", line)
         if not m:
             i += 1
             continue
 
-        # Извличаме данните
         post_date = normalize_date(m.group(1))
         tr_type = "D" if m.group(2) in ("ДТ", "DT") else "C"
-        amt = m.group(3).replace(",", ".")
 
-        # Описание = този ред
+        # 2) Опитваме да намерим сума в същия ред
+        amt_match = re.search(r"(\d+[\.,]\d{2})", line)
+
+        # 3) Ако няма сума → търсим в следващия ред
+        if not amt_match and i + 1 < len(lines):
+            amt_match = re.search(r"(\d+[\.,]\d{2})", lines[i+1])
+
+        if not amt_match:
+            i += 1
+            continue
+
+        amt = amt_match.group(1).replace(",", ".")
+
+        # 4) Събираме описание
         desc = line
-
-        # Следващите редове са продължение на описанието,
-        # докато не срещнем нова дата (начало на нова транзакция)
         j = i + 1
         while j < len(lines) and not re.match(r"\d{2}\.\d{2}\.\d{4}", lines[j]):
             desc += " " + lines[j]
             j += 1
 
-        # Извличаме име и основание
         name, rem = extract_name_and_reason(desc)
         tr_name = "ТЕГЛЕНЕ" if "ATM" in desc else "ОПЕРАЦИЯ"
 
