@@ -156,20 +156,22 @@ def parse_unicredit_statement(text):
     client_match = re.search(r"Получател\s*\|\s*Recipient\s*\n([A-ZА-Яa-zа-я\s]+)", text)
     client_name = client_match.group(1).strip() if client_match else "Клиент"
 
-    # --- Групиране на редове в блокове ---
+    # --- Групиране на блокове ---
     blocks = []
     current = []
 
-    date_start = re.compile(r"^\d{2}\.\d{2}\.\d{4}")
+    def is_date_line(line):
+        return bool(re.match(r"^\d{2}\.\d{2}\.\d{4}", line))
 
-    for line in lines:
-        if date_start.match(line):
-            if current:
+    for i, line in enumerate(lines):
+        if is_date_line(line):
+            # ако следващият ред също е дата → това е продължение, не нов блок
+            if current and not is_date_line(lines[i - 1]):
                 blocks.append("\n".join(current))
-            current = [line]
+                current = []
+            current.append(line)
         else:
-            if current:
-                current.append(line)
+            current.append(line)
 
     if current:
         blocks.append("\n".join(current))
@@ -199,10 +201,9 @@ def parse_unicredit_statement(text):
 
         amt = m_amt.group(1).replace(",", "").strip()
 
-        # описание
         desc = block
 
-        # ATM?
+        # ATM операции
         if "ATM" in desc or "Операция с карта" in desc:
             name = "null"
             rem = "ТЕГЛЕНЕ АТМ"
